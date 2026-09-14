@@ -622,6 +622,7 @@ void namcos22_renderer::poly3d_drawsprite(
 			sp.fade_r = extra.fadecolor.get_r(); sp.fade_g = extra.fadecolor.get_g(); sp.fade_b = extra.fadecolor.get_b();
 			sp.alpha_enabled = extra.alpha_enabled; sp.alpha = extra.alpha; sp.alpha_pen = m_state.m_poly_alpha_pen;
 			sp.sprite_code = code % gfx->elements(); sp.flipx = flipx; sp.flipy = flipy;
+			sp.cz_bank = int32_t(m_tcvr_sprite_group);   // sprite: node id (cz_bank is unused for sprites)
 			tcvr_scene_sprite(sv, sp);
 		}
 		if (tcvr_scene_mode() >= 2) return;   // TCVR: the GPU draws it
@@ -633,6 +634,7 @@ void namcos22_renderer::render_sprite(screen_device &screen, bitmap_rgb32 &bitma
 {
 	// scene clip
 	m_cliprect.set(node->data.sprite.cx_min, node->data.sprite.cx_max, node->data.sprite.cy_min, node->data.sprite.cy_max);
+	++m_tcvr_sprite_group;   // TCVR: every cell of this node shares one placement in VR
 	m_cliprect &= screen.visible_area();
 
 	int offset = 0;

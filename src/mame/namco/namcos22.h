@@ -164,6 +164,7 @@ public:
 	// priority bitmap owned by the driver (double-buffered) instead of the
 	// screen's single one, which the in-flight frame and the next would share.
 	bool m_skip_wait = false;
+	uint32_t m_tcvr_sprite_group = 0;
 	bitmap_ind8 *m_primap = nullptr;
 	struct namcos22_scenenode *new_scenenode(running_machine &machine, u32 zsort, namcos22_scenenode_type type);
 
