@@ -41,6 +41,9 @@ struct tcvr_audio_store
 	std::atomic<std::uint64_t> write_frame{ 0 };
 	int rate = 48000;
 	int channels = 2;
+	// Consumer-only state, touched exclusively by the AAudio callback.
+	bool primed = false;
+	std::int16_t last[2] = { 0, 0 };
 
 	tcvr_audio_store()
 		: samples(std::size_t(48000) * 2 * std::size_t(2), 0)
@@ -400,25 +403,91 @@ extern "C" int tcvr_mame_audio_info(int *rate, int *channels, std::uint64_t *wri
 	return 1;
 }
 
+// The emulator clock and the audio device clock are independent, and always
+// will be: MAME advances on the original arcade timing while AAudio consumes at
+// exactly 48 kHz. They drift by a fraction of a percent, which is a few dozen
+// samples every second.
+//
+// Draining the ring to empty on every callback turned that drift straight into
+// gaps of silence -- several per second, heard as crackling. The reader now
+// keeps a deliberate cushion and absorbs the drift by consuming one frame more
+// or less than it emits, which is a 0.5% pitch change on a single 4 ms buffer
+// and is inaudible. It never returns a partially filled buffer.
 extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size_t destination_frames, std::uint64_t *cursor)
 {
 	if (!destination || !cursor || !destination_frames)
 		return 0;
-	std::size_t const capacity = s_audio.samples.size() / std::size_t(s_audio.channels);
+	int const channels = s_audio.channels;
+	std::size_t const capacity = s_audio.samples.size() / std::size_t(channels);
 	std::uint64_t const write_frame = s_audio.write_frame.load(std::memory_order_acquire);
+
+	// The cushion we aim to keep between the emulator and the speaker: enough to
+	// ride out a slow frame, short enough not to be felt as lag.
+	std::uint64_t const target = std::uint64_t(s_audio.rate) * 80u / 1000u;
+
+	if (!s_audio.primed)
+	{
+		if (write_frame < target)
+			return 0;  // still filling; silence is correct here, and brief
+		*cursor = write_frame - target;
+		s_audio.primed = true;
+	}
+
+	// Never read samples the producer has already overwritten.
 	std::uint64_t const oldest = (write_frame > capacity) ? write_frame - capacity : 0;
 	if (*cursor < oldest)
 		*cursor = oldest;
-	std::uint64_t const available = write_frame - *cursor;
-	std::size_t const frames = std::min<std::size_t>(destination_frames, std::size_t(available));
-	for (std::size_t frame = 0; frame < frames; ++frame)
+
+	std::uint64_t const available = (write_frame > *cursor) ? write_frame - *cursor : 0;
+
+	if (available < destination_frames)
 	{
-		std::size_t const slot = ((*cursor + frame) % capacity) * std::size_t(s_audio.channels);
-		std::memcpy(destination + frame * std::size_t(s_audio.channels), s_audio.samples.data() + slot,
-			std::size_t(s_audio.channels) * sizeof(std::int16_t));
+		// A real underrun. Hold the last sample instead of dropping to zero --
+		// a held level is far less audible than a square edge into silence --
+		// and re-prime so the cushion is rebuilt rather than chased forever.
+		for (std::size_t frame = 0; frame < available; ++frame)
+		{
+			std::size_t const slot = ((*cursor + frame) % capacity) * std::size_t(channels);
+			std::memcpy(destination + frame * std::size_t(channels), s_audio.samples.data() + slot,
+				std::size_t(channels) * sizeof(std::int16_t));
+		}
+		if (available)
+		{
+			std::size_t const slot = ((*cursor + available - 1) % capacity) * std::size_t(channels);
+			for (int channel = 0; channel < channels && channel < 2; ++channel)
+				s_audio.last[channel] = s_audio.samples[slot + channel];
+		}
+		for (std::size_t frame = available; frame < destination_frames; ++frame)
+			for (int channel = 0; channel < channels; ++channel)
+				destination[frame * std::size_t(channels) + channel] = s_audio.last[channel < 2 ? channel : 1];
+		*cursor = write_frame;
+		s_audio.primed = false;
+		return destination_frames;
 	}
-	*cursor += frames;
-	return frames;
+
+	// Trim the drift by at most one frame per callback, and only when the
+	// cushion has actually wandered out of band.
+	std::size_t consume = destination_frames;
+	if (available < target / 2 && consume > 1)
+		--consume;                       // running dry: stretch very slightly
+	else if (available > target * 2)
+		++consume;                       // piling up: shrink very slightly
+	if (std::uint64_t(consume) > available)
+		consume = std::size_t(available);
+
+	for (std::size_t frame = 0; frame < destination_frames; ++frame)
+	{
+		std::size_t const source = (frame * consume) / destination_frames;
+		std::size_t const slot = ((*cursor + source) % capacity) * std::size_t(channels);
+		std::memcpy(destination + frame * std::size_t(channels), s_audio.samples.data() + slot,
+			std::size_t(channels) * sizeof(std::int16_t));
+	}
+	std::size_t const lastSlot = ((*cursor + consume - 1) % capacity) * std::size_t(channels);
+	for (int channel = 0; channel < channels && channel < 2; ++channel)
+		s_audio.last[channel] = s_audio.samples[lastSlot + channel];
+
+	*cursor += consume;
+	return destination_frames;
 }
 
 extern "C" void tcvr_mame_set_digital(char const *id, bool pressed)
