@@ -12,15 +12,50 @@
 
 #include <android/log.h>
 
+#include <cstring>
+#include <algorithm>
+#include <mutex>
+#include <vector>
+
 namespace {
 
 constexpr char kLogTag[] = "TCVR_MAME";
 
+struct tcvr_video_store
+{
+	std::mutex mutex;
+	std::vector<std::uint32_t> pixels;
+	int width = 0;
+	int height = 0;
+	int stride = 0;
+	std::uint64_t sequence = 0;
+};
+
+tcvr_video_store s_video;
+
 class tcvr_osd final : public osd_interface
 {
 public:
-	void init(running_machine &) override { }
-	void update(bool) override { }
+	void init(running_machine &machine) override { m_machine = &machine; }
+	void update(bool) override
+	{
+		if (!m_machine)
+			return;
+		screen_device *screen = screen_device_enumerator(m_machine->root_device()).first();
+		if (!screen || screen->curbitmap().format() != BITMAP_FORMAT_RGB32)
+			return;
+
+		bitmap_rgb32 &bitmap = screen->curbitmap().as_rgb32();
+		std::lock_guard lock(s_video.mutex);
+		s_video.width = bitmap.width();
+		s_video.height = bitmap.height();
+		s_video.stride = bitmap.rowpixels();
+		s_video.pixels.resize(std::size_t(s_video.stride) * std::size_t(s_video.height));
+		for (int y = 0; y < s_video.height; ++y)
+			std::memcpy(s_video.pixels.data() + std::size_t(y) * s_video.stride,
+				&bitmap.pix(y), std::size_t(s_video.stride) * sizeof(std::uint32_t));
+		++s_video.sequence;
+	}
 	void input_update(bool) override { }
 	void check_osd_inputs() override { }
 	void set_verbose(bool) override { }
@@ -50,6 +85,9 @@ public:
 	std::vector<osd::midi_port_info> list_midi_ports() override { return {}; }
 	std::unique_ptr<osd::network_device> open_network_device(int, osd::network_handler &) override { return {}; }
 	std::vector<osd::network_device_info> list_network_devices() override { return {}; }
+
+private:
+	running_machine *m_machine = nullptr;
 };
 
 class tcvr_machine_manager final : public machine_manager
@@ -146,7 +184,18 @@ extern "C" int tcvr_mame_boot_smoke(const char *driver_id, const char *rom_path,
 		running_machine machine(config, manager);
 		manager.set_machine(&machine);
 		int const result = machine.run(true);
-		__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_M2 boot result=%d frames=%d", result, *frame_count);
+		int width = 0;
+		int height = 0;
+		int stride = 0;
+		std::uint64_t sequence = 0;
+		{
+			std::lock_guard lock(s_video.mutex);
+			width = s_video.width;
+			height = s_video.height;
+			stride = s_video.stride;
+			sequence = s_video.sequence;
+		}
+		__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_M2 boot result=%d frames=%d video=%dx%d stride=%d seq=%llu", result, *frame_count, width, height, stride, static_cast<unsigned long long>(sequence));
 		return result;
 	}
 	catch (std::exception const &error)
@@ -154,4 +203,26 @@ extern "C" int tcvr_mame_boot_smoke(const char *driver_id, const char *rom_path,
 		__android_log_print(ANDROID_LOG_ERROR, kLogTag, "TCVR_M2 exception: %s", error.what());
 		return EMU_ERR_FATALERROR;
 	}
+}
+
+extern "C" int tcvr_mame_latest_video_info(int *width, int *height, int *stride, std::uint64_t *sequence)
+{
+	if (!width || !height || !stride || !sequence)
+		return 0;
+	std::lock_guard lock(s_video.mutex);
+	*width = s_video.width;
+	*height = s_video.height;
+	*stride = s_video.stride;
+	*sequence = s_video.sequence;
+	return (!s_video.pixels.empty()) ? 1 : 0;
+}
+
+extern "C" std::size_t tcvr_mame_copy_latest_video(std::uint32_t *destination, std::size_t destination_pixels)
+{
+	if (!destination)
+		return 0;
+	std::lock_guard lock(s_video.mutex);
+	std::size_t const count = std::min(destination_pixels, s_video.pixels.size());
+	std::memcpy(destination, s_video.pixels.data(), count * sizeof(std::uint32_t));
+	return count;
 }
