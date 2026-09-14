@@ -154,6 +154,9 @@ struct tcvr_input_store
 	bool trigger = false;
 	bool pedal = false;
 	float gun_x = 0.5f;
+	// driving profile (System 22 racers): steering 0..1 (0.5 centre), pedals 0..1
+	float steer = 0.5f, gas = 0.0f, brake = 0.0f;
+	bool shift_up = false, shift_down = false, view = false;
 	float gun_y = 0.5f;
 };
 
@@ -434,8 +437,8 @@ private:
 				__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_SOUND emulation %s by debug.tcvr.pause",
 					wantPause ? "PAUSED" : "resumed");
 			}
-			bool coin, start, trigger, pedal;
-			float gun_x, gun_y;
+			bool coin, start, trigger, pedal, shift_up, shift_down, view;
+			float gun_x, gun_y, steer, gas, brake;
 			{
 				std::lock_guard lock(s_input.mutex);
 				coin = s_input.coin;
@@ -444,6 +447,8 @@ private:
 				pedal = s_input.pedal;
 				gun_x = s_input.gun_x;
 				gun_y = s_input.gun_y;
+				steer = s_input.steer; gas = s_input.gas; brake = s_input.brake;
+				shift_up = s_input.shift_up; shift_down = s_input.shift_down; view = s_input.view;
 			}
 			ioport_list const &ports = m_machine->ioport().ports();
 			auto find_port = [&ports](char const *tag) -> ioport_port *
@@ -471,11 +476,25 @@ private:
 					}
 			};
 			set_button("INPUTS", 0x0001, coin);
-			set_button("INPUTS", 0x0010, trigger);
-			set_button("INPUTS", 0x0020, pedal);
-			set_axis("OPT.0", gun_x);
-			set_axis("OPT.1", gun_y);
-			set_button("INPUTS", 0x0100, start);
+			if (find_port("ADC.0"))
+			{
+				// A System 22 racer (Dirt Dash, Ridge Racer...): the INPUTS bits mean
+				// view / shift, not trigger / pedal, and the game starts on the gas.
+				set_axis("ADC.0", steer);
+				set_axis("ADC.1", gas);
+				set_axis("ADC.2", brake);
+				set_button("INPUTS", 0x0010, view);
+				set_button("INPUTS", 0x0020, shift_up);
+				set_button("INPUTS", 0x0040, shift_down);
+			}
+			else
+			{
+				set_button("INPUTS", 0x0010, trigger);
+				set_button("INPUTS", 0x0020, pedal);
+				set_axis("OPT.0", gun_x);
+				set_axis("OPT.1", gun_y);
+				set_button("INPUTS", 0x0100, start);
+			}
 			if (!m_inputLogged || coin != m_lastCoin || start != m_lastStart || trigger != m_lastTrigger || pedal != m_lastPedal)
 			{
 				__android_log_print(ANDROID_LOG_INFO, kLogTag,
@@ -1028,6 +1047,12 @@ extern "C" void tcvr_mame_set_digital(char const *id, bool pressed)
 		s_input.trigger = pressed;
 	else if (!std::strcmp(id, "pedal"))
 		s_input.pedal = pressed;
+	else if (!std::strcmp(id, "shift_up"))
+		s_input.shift_up = pressed;
+	else if (!std::strcmp(id, "shift_down"))
+		s_input.shift_down = pressed;
+	else if (!std::strcmp(id, "view"))
+		s_input.view = pressed;
 }
 
 extern "C" void tcvr_mame_set_analog(char const *id, float value)
@@ -1039,6 +1064,12 @@ extern "C" void tcvr_mame_set_analog(char const *id, float value)
 		s_input.gun_x = value;
 	else if (!std::strcmp(id, "gun_y"))
 		s_input.gun_y = value;
+	else if (!std::strcmp(id, "steer"))
+		s_input.steer = value;
+	else if (!std::strcmp(id, "gas"))
+		s_input.gas = value;
+	else if (!std::strcmp(id, "brake"))
+		s_input.brake = value;
 }
 
 // ---------------------------------------------------------------------------
