@@ -1,6 +1,7 @@
 // license:BSD-3-Clause
 // Native M1 entry boundary. M2 replaces its no-op hooks with the ArcadeXR bridge.
 #include "emu.h"
+#include "drivenum.h"
 #include "main.h"
 #include "rendlay.h"
 
@@ -24,4 +25,9 @@ bool emulator_info::standalone() { return true; }
 extern "C" int tcvr_mame_core_abi_version()
 {
 	return 1;
+}
+
+extern "C" int tcvr_mame_has_driver(const char *driver_id)
+{
+	return driver_id && driver_list::find(driver_id) >= 0;
 }
