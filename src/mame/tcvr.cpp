@@ -1076,7 +1076,13 @@ struct tcvr_scene_store
 tcvr_scene_store s_scene;
 }
 
-extern "C" void tcvr_mame_scene_enable(int enabled) { s_scene.enabled.store(enabled ? 1 : 0, std::memory_order_relaxed); }
+extern "C" void tcvr_mame_scene_enable(int enabled)
+{
+	// 0 = disabled, 1 = record alongside the CPU rasteriser, 2 = record and
+	// let the Quest GPU rasterise.  Do not coerce this to bool: doing so made
+	// mode 2 unreachable and paid for both rasterisers in immersive mode.
+	s_scene.enabled.store(std::clamp(enabled, 0, 2), std::memory_order_relaxed);
+}
 extern "C" int tcvr_scene_mode(void) { return s_scene.enabled.load(std::memory_order_relaxed); }
 extern "C" void tcvr_scene_begin(void)
 {
