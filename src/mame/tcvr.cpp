@@ -706,10 +706,11 @@ extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size
 			std::uint64_t const produced = write_frame - s_audio.rate_last_write;
 			std::int64_t const measured = std::int64_t((produced << 16) / s_audio.rate_output);
 			// Ignore a reading that could only come from a stall or a wrap.
-			// Only believe a reading that is plausible for a running emulator.
-			// A wider window lets a stall be mistaken for the machine's true
-			// speed, and the feed-forward then chases a number that never was.
-			if (measured > 65536 * 95 / 100 && measured < 65536 * 105 / 100)
+			// Wide enough to include an emulator genuinely running below realtime,
+			// which this one does: 95.2% was measured during the failure and a
+			// narrower window would simply have frozen the feed-forward at the
+			// last value it happened to accept.
+			if (measured > 65536 * 85 / 100 && measured < 65536 * 115 / 100)
 				s_audio.rate_measured = measured;
 		}
 		s_audio.rate_last_write = write_frame;
@@ -719,7 +720,12 @@ extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size
 	std::int64_t const error = std::int64_t(available) - std::int64_t(target);
 	std::int64_t const span = std::int64_t(s_audio.rate) * 2;
 	std::int64_t aim = s_audio.rate_measured + (span > 0 ? (error * 65536) / span : 0);
-	std::int64_t const lowest = 65536 - 65536 * 4 / 100;    // -4%
+	// Asymmetric on purpose. Consuming too slowly costs latency, and the ceiling
+	// above already bounds that. Consuming too fast costs SILENCE, which is what
+	// is actually being heard. Measured during the failure, MAME was producing at
+	// 95.2% of realtime while this floor was pinned at 96%: the reader was
+	// structurally faster than the producer, so the buffer could only ever empty.
+	std::int64_t const lowest = 65536 - 65536 * 10 / 100;   // -10%
 	std::int64_t const highest = 65536 + 65536 * 4 / 100;   // +4%
 	if (aim < lowest) aim = lowest;
 	if (aim > highest) aim = highest;
@@ -794,9 +800,19 @@ extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size
 		// Advance by what was actually consumed, not to the writer. Jumping the
 		// cursor forward here would drop whatever the producer wrote in the
 		// meantime; the held samples covered the gap, they did not consume it.
+		// Keep going. Do NOT de-prime.
+		//
+		// De-priming looked prudent and was the single worst thing in this file:
+		// the re-prime below then waited for a FULL cushion to rebuild before
+		// playing anything, which is thirty-odd callbacks of pure silence. The
+		// counters said so outright -- silent climbing by 32 every second
+		// alongside one underrun a second -- and that is what the player heard as
+		// "it cuts, then a bit later it cuts again".
+		//
+		// A shortfall costs exactly the frames it was short. The loop rebuilds
+		// the cushion by consuming very slightly slower, inaudibly, over seconds.
 		*cursor += copied;
 		s_audio.phase = 0;
-		s_audio.primed = false;
 		return destination_frames;
 	}
 
