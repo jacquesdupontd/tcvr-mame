@@ -19,6 +19,12 @@
 #include <mutex>
 #include <atomic>
 #include <thread>
+#if defined(__ANDROID__) || defined(__linux__)
+#include <sched.h>
+#include <sys/system_properties.h>
+#include <android/log.h>
+#include <cstdlib>
+#endif
 #include <vector>
 #include <algorithm>
 // MAME headers
@@ -91,9 +97,54 @@ int osd_get_num_processors(bool heavy_mt)
 	// multithreading is not supported at this time
 	return 1;
 #else
+	// hardware_concurrency() reports the CORES THE MACHINE HAS, not the cores
+	// this process may use. On a Quest 3 it answers 6, while Android confines an
+	// immersive app to a three-core cpuset:
+	//
+	//     Cpus_allowed_list:  3-5
+	//     cpuset:             /immersive
+	//
+	// MAME therefore sized its rasteriser queue for four threads, and with the XR
+	// renderer alongside that put FIVE runnable threads on THREE cores. The
+	// emulation thread, which needs a whole core to hold 60 fps, got about sixty
+	// percent of one -- and delivered 49 blocks of audio per second instead of 50,
+	// which is the entire audio problem in this project.
+	//
+	// Ask the scheduler what we may actually use.
 	unsigned int threads = std::thread::hardware_concurrency();
-	// max out at 4 for now since scaling above that seems to do poorly
-	return heavy_mt ? threads : std::min(std::thread::hardware_concurrency(), 4U);
+#if defined(__ANDROID__) || defined(__linux__)
+	cpu_set_t allowed;
+	CPU_ZERO(&allowed);
+	if (sched_getaffinity(0, sizeof(allowed), &allowed) == 0)
+	{
+		int const usable = CPU_COUNT(&allowed);
+		if (usable > 0)
+			threads = unsigned(usable);
+	}
+#endif
+	// Reserve one core for the XR renderer, which needs a whole one to present
+	// at 120 Hz and is not part of MAME's accounting. Without this the emulation
+	// thread and the renderer fight for the same core and the emulator loses.
+	// Overridable, because the right number is a measurement and not a belief.
+	{
+		char value[PROP_VALUE_MAX] = {};
+		if (__system_property_get("debug.tcvr.mameThreads", value) > 0 && value[0])
+		{
+			int const forced = atoi(value);
+			if (forced > 0)
+				threads = unsigned(forced);
+		}
+		else if (threads > 1)
+		{
+			threads -= 1;
+		}
+	}
+	if (threads < 1)
+		threads = 1;
+	__android_log_print(ANDROID_LOG_INFO, "TCVR_MAME",
+		"TCVR_SOUND worker pool sized to %u (cores allowed to this process, minus one for the renderer)",
+		threads);
+	return heavy_mt ? threads : std::min(threads, 4U);
 #endif
 }
 
