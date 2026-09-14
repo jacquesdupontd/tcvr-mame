@@ -83,6 +83,10 @@ struct tcvr_audio_store
 	std::chrono::steady_clock::time_point last_push_at{};
 	std::atomic<std::uint64_t> stalls{ 0 };
 	std::atomic<std::uint32_t> worst_gap_ms{ 0 };
+	std::uint64_t pushed_since = 0;
+	std::chrono::steady_clock::time_point rate_window{};
+	std::uint64_t consumed_since = 0;
+	std::chrono::steady_clock::time_point consume_window{};
 	std::uint32_t phase = 0;              // 0.16 fixed-point resampler phase
 	std::int64_t ratio_fine = std::int64_t(65536) << 8;  // 16.16 << 8, smoothed playback ratio
 	std::int64_t ratio_applied = std::int64_t(65536) << 8;  // slew-limited output ratio
@@ -245,6 +249,27 @@ public:
 					s_audio.worst_gap_ms.store(std::uint32_t(gap), std::memory_order_relaxed);
 			}
 			s_audio.last_push_at = now;
+
+			// Frames produced per wall-clock second, stated outright. The
+			// feed-forward infers this from cursor arithmetic, and the inference
+			// disagrees with what MAME reports as its own speed: 59.90 fps is
+			// 99.8% of realtime, yet the inferred production rate sits near 95%.
+			// One of the two is wrong, and until this line existed there was no
+			// way to tell which.
+			s_audio.pushed_since += std::uint64_t(samples_this_frame);
+			if (s_audio.rate_window.time_since_epoch().count() == 0)
+				s_audio.rate_window = now;
+			auto const window = std::chrono::duration_cast<std::chrono::milliseconds>(
+				now - s_audio.rate_window).count();
+			if (window >= 1000)
+			{
+				__android_log_print(ANDROID_LOG_INFO, kLogTag,
+					"TCVR_SOUND produced %llu frames in %lld ms = %.0f/s (device wants %d/s)",
+					(unsigned long long)s_audio.pushed_since, (long long)window,
+					double(s_audio.pushed_since) * 1000.0 / double(window), s_audio.rate);
+				s_audio.pushed_since = 0;
+				s_audio.rate_window = now;
+			}
 		}
 		if (samples_this_frame != s_audio.last_push_frames)
 		{
@@ -594,6 +619,23 @@ extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size
 	std::uint64_t const target = std::uint64_t(s_audio.rate) * 120u / 1000u;
 
 	s_audio.callbacks.fetch_add(1, std::memory_order_relaxed);
+	{
+		auto const now = std::chrono::steady_clock::now();
+		s_audio.consumed_since += destination_frames;
+		if (s_audio.consume_window.time_since_epoch().count() == 0)
+			s_audio.consume_window = now;
+		auto const window = std::chrono::duration_cast<std::chrono::milliseconds>(
+			now - s_audio.consume_window).count();
+		if (window >= 1000)
+		{
+			__android_log_print(ANDROID_LOG_INFO, kLogTag,
+				"TCVR_SOUND device asked for %llu frames in %lld ms = %.0f/s",
+				(unsigned long long)s_audio.consumed_since, (long long)window,
+				double(s_audio.consumed_since) * 1000.0 / double(window));
+			s_audio.consumed_since = 0;
+			s_audio.consume_window = now;
+		}
+	}
 
 	if (!s_audio.primed)
 	{
@@ -685,8 +727,28 @@ extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size
 	// what keeps it inaudible: a one-pole filter with a time constant near a
 	// second, far below the few hertz the ear hears as tremolo. The ratio tracks
 	// the emulator's real speed and creeps there over seconds.
-	// Feed-forward: measure how fast the producer is ACTUALLY running, rather
-	// than inferring it from how empty the buffer has become.
+	// The feed-forward is GONE, and this is why.
+	//
+	// It inferred the producer's speed from cursor arithmetic and reported 0.95,
+	// sometimes 0.87. The control loop believed it and pitched the audio down by
+	// up to six percent to match -- which is precisely the wandering pitch the
+	// player kept reporting. It was chasing a drift that does not exist.
+	//
+	// Measured directly in wall clock, at the two places where frames actually
+	// cross the boundary:
+	//
+	//     produced      47952 to 48094 frames per second
+	//     device asked  48000 to 48048 frames per second
+	//
+	// The two clocks agree to a tenth of a percent. There is no drift to correct,
+	// and every gram of pitch modulation this file produced was self-inflicted.
+	//
+	// So: drive on the one quantity that IS measured directly here -- the depth
+	// of the cushion -- and clamp the correction to one percent, which is about
+	// seventeen cents and only ever used to walk the cushion back to its target
+	// after a real stall. The raw inference is still computed and logged, purely
+	// so the discrepancy stays visible rather than being forgotten.
+	// Feed-forward, kept only as a diagnostic.
 	//
 	// A purely proportional loop cannot do this. Its correction is a function of
 	// the error, so it only produces the -4% needed to follow a 96% emulator once
@@ -718,15 +780,17 @@ extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size
 	}
 
 	std::int64_t const error = std::int64_t(available) - std::int64_t(target);
-	std::int64_t const span = std::int64_t(s_audio.rate) * 2;
-	std::int64_t aim = s_audio.rate_measured + (span > 0 ? (error * 65536) / span : 0);
+	std::int64_t const span = std::int64_t(s_audio.rate) * 4;
+	std::int64_t aim = 65536 + (span > 0 ? (error * 65536) / span : 0);
 	// Asymmetric on purpose. Consuming too slowly costs latency, and the ceiling
 	// above already bounds that. Consuming too fast costs SILENCE, which is what
 	// is actually being heard. Measured during the failure, MAME was producing at
 	// 95.2% of realtime while this floor was pinned at 96%: the reader was
 	// structurally faster than the producer, so the buffer could only ever empty.
-	std::int64_t const lowest = 65536 - 65536 * 10 / 100;   // -10%
-	std::int64_t const highest = 65536 + 65536 * 4 / 100;   // +4%
+	// One percent, about seventeen cents. Enough to walk a drained cushion back
+	// to target over a few seconds, far too little to be heard as a bend.
+	std::int64_t const lowest = 65536 - 65536 / 100;
+	std::int64_t const highest = 65536 + 65536 / 100;
 	if (aim < lowest) aim = lowest;
 	if (aim > highest) aim = highest;
 	// One-pole smoothing, time constant a few hundred callbacks -- a second or so.
