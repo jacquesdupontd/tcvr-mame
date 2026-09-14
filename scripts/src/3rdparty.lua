@@ -135,6 +135,13 @@ if _OPTIONS["targetos"]=="linux" or _OPTIONS["targetos"]=="freebsd" or _OPTIONS[
 		MAME_DIR .. "3rdparty/expat/lib/random_getentropy.c",
 	}
 end
+if _OPTIONS["targetos"]=="android" then
+	-- Android API 24 exposes the kernel syscall but not libc's getrandom symbol.
+	defines { "HAVE_SYSCALL_GETRANDOM" }
+	files {
+		MAME_DIR .. "3rdparty/expat/lib/random_getrandom.c",
+	}
+end
 if BASE_TARGETOS=="unix" then
 	files {
 		MAME_DIR .. "3rdparty/expat/lib/random_dev_urandom.c",

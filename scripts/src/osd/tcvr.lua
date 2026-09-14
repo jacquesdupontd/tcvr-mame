@@ -33,6 +33,9 @@ project ("ocore_tcvr")
 uuid (os.uuid("ocore_tcvr"))
 kind (LIBTYPE)
 tcvr_includes()
+configuration { "android*" }
+defines { "SDLMAME_ANDROID" }
+configuration { }
 files {
     MAME_DIR .. "src/osd/asio.cpp",
     MAME_DIR .. "src/osd/osdcore.cpp",
@@ -40,6 +43,10 @@ files {
     MAME_DIR .. "src/osd/strconv.cpp",
     MAME_DIR .. "src/osd/modules/file/posixdir.cpp",
     MAME_DIR .. "src/osd/modules/file/posixfile.cpp",
+    MAME_DIR .. "src/osd/modules/file/posixptty.cpp",
+    MAME_DIR .. "src/osd/modules/file/posixsocket.cpp",
+    MAME_DIR .. "src/osd/interface/inputseq.cpp",
+    MAME_DIR .. "src/osd/interface/nethandler.cpp",
     MAME_DIR .. "src/osd/modules/lib/osdlib_unix.cpp",
     MAME_DIR .. "src/osd/modules/lib/osdobj_common.cpp",
 }

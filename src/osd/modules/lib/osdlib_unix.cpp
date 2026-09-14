@@ -12,10 +12,12 @@
 #include "osdcore.h"
 #include "osdlib.h"
 
-#ifdef SDLMAME_SDL3
+#if !defined(SDLMAME_ANDROID)
+#if defined(SDLMAME_SDL3)
 #include <SDL3/SDL.h>
 #else
 #include <SDL2/SDL.h>
+#endif
 #endif
 
 #include <csignal>
