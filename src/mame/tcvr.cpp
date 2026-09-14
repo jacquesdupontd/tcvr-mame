@@ -57,6 +57,11 @@ struct tcvr_audio_store
 	// Consumer-only state, touched exclusively by the AAudio callback.
 	bool primed = false;
 	std::uint32_t phase = 0;              // 0.16 fixed-point resampler phase
+	std::int64_t ratio_fine = std::int64_t(65536) << 8;  // 16.16 << 8, smoothed playback ratio
+	std::int64_t ratio_applied = std::int64_t(65536) << 8;  // slew-limited output ratio
+	std::int64_t rate_measured = 65536;   // 16.16, the producer's measured rate
+	std::uint64_t rate_last_write = 0;    // write cursor at the last measurement
+	std::size_t rate_output = 0;          // output frames since the last measurement
 	std::int16_t last[2] = { 0, 0 };
 	// Counters, so "the sound crackles" can be a number instead of an opinion.
 	// Written by the audio callback, read by anyone; relaxed is enough.
@@ -487,6 +492,10 @@ extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size
 		}
 		*cursor = write_frame - target;
 		s_audio.phase = 0;
+		s_audio.ratio_fine = std::int64_t(s_audio.rate_measured) << 8;
+		s_audio.ratio_applied = s_audio.ratio_fine;
+		s_audio.rate_last_write = write_frame;
+		s_audio.rate_output = 0;
 		s_audio.primed = true;
 	}
 
@@ -501,16 +510,85 @@ extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size
 	std::uint64_t const available = (write_frame > *cursor) ? write_frame - *cursor : 0;
 	s_audio.cushion.store(std::uint32_t(available > 0xffffffffu ? 0xffffffffu : available), std::memory_order_relaxed);
 
-	// Playback ratio in 16.16 fixed point: input frames consumed per output
-	// frame. Unity plus a correction proportional to the cushion error, aiming to
-	// absorb that error over about half a second, and clamped to +/-3%.
+	// Playback ratio in 16.16 fixed point: input frames consumed per output frame.
+	//
+	// What makes this audible or not is the SPEED of the change, not its size.
+	//
+	// Version one corrected over half a second and allowed +/-3%: the ratio swung
+	// between -1.6% and +1.1% and moved on every callback, which is tremolo.
+	// Version two kept the slow smoothing but clamped to +/-0.5%: no tremolo, but
+	// measured on a real attract sequence MAME runs at 57-58 fps, four to eight
+	// percent below realtime, and half a percent cannot follow that -- the
+	// cushion drained and it underran roughly every two seconds.
+	//
+	// The clamp was the wrong lever, and for a reason worth writing down: when
+	// the emulator runs at 96% of realtime, its music genuinely IS slower. Playing
+	// its samples back at 96% is not a distortion, it is faithful to what the
+	// machine is doing, and pitch-shifting them back to 100% would be the lie.
+	//
+	// So the clamp is wide enough to follow the emulator, and the SMOOTHING is
+	// what keeps it inaudible: a one-pole filter with a time constant near a
+	// second, far below the few hertz the ear hears as tremolo. The ratio tracks
+	// the emulator's real speed and creeps there over seconds.
+	// Feed-forward: measure how fast the producer is ACTUALLY running, rather
+	// than inferring it from how empty the buffer has become.
+	//
+	// A purely proportional loop cannot do this. Its correction is a function of
+	// the error, so it only produces the -4% needed to follow a 96% emulator once
+	// the error is large -- and "large" here meant the cushion had drained to 388
+	// frames of the 3840 it was aiming for, eight milliseconds from silence. That
+	// is textbook steady-state droop, and it was plainly visible in the counters.
+	//
+	// The producer's rate is not a mystery to be inferred: write_frame says it
+	// outright. Measure it over a quarter of a second, use it directly, and leave
+	// the proportional term with the only job it is good at -- nudging the cushion
+	// back to where it should sit.
+	s_audio.rate_output += destination_frames;
+	if (s_audio.rate_output >= std::size_t(s_audio.rate) / 4)
+	{
+		if (s_audio.rate_last_write != 0 && write_frame > s_audio.rate_last_write)
+		{
+			std::uint64_t const produced = write_frame - s_audio.rate_last_write;
+			std::int64_t const measured = std::int64_t((produced << 16) / s_audio.rate_output);
+			// Ignore a reading that could only come from a stall or a wrap.
+			if (measured > 65536 * 4 / 5 && measured < 65536 * 5 / 4)
+				s_audio.rate_measured = measured;
+		}
+		s_audio.rate_last_write = write_frame;
+		s_audio.rate_output = 0;
+	}
+
 	std::int64_t const error = std::int64_t(available) - std::int64_t(target);
-	std::int64_t const span = std::int64_t(s_audio.rate) / 2;
-	std::int64_t ratio = 65536 + (span > 0 ? (error * 65536) / span : 0);
-	std::int64_t const lowest = 65536 * 97 / 100;
-	std::int64_t const highest = 65536 * 103 / 100;
-	if (ratio < lowest) ratio = lowest;
-	if (ratio > highest) ratio = highest;
+	std::int64_t const span = std::int64_t(s_audio.rate) * 2;
+	std::int64_t aim = s_audio.rate_measured + (span > 0 ? (error * 65536) / span : 0);
+	std::int64_t const lowest = 65536 - 65536 * 4 / 100;    // -4%
+	std::int64_t const highest = 65536 + 65536 * 4 / 100;   // +4%
+	if (aim < lowest) aim = lowest;
+	if (aim > highest) aim = highest;
+	// One-pole smoothing, time constant a few hundred callbacks -- a second or so.
+	//
+	// Carried at eight extra bits of precision. A first version smoothed the
+	// 16.16 value directly, and integer division then truncated every step
+	// smaller than 256 counts to zero: a dead zone of 0.39%, wider than the
+	// 0.5% clamp around it, so the correction never moved at all and the ratio
+	// sat at exactly 1.0 while the cushion quietly drifted. The counters said
+	// so -- ratioPpm=1000000 with the cushion 384 frames below target -- which
+	// is the whole reason for printing them.
+	s_audio.ratio_fine += ((aim << 8) - s_audio.ratio_fine) / 256;
+	// Hard ceiling on how fast the pitch may move, whatever the loop wants.
+	// Following the emulator's real speed is right; gliding there audibly is
+	// not, and a glide is exactly what "it slows down and speeds up like a
+	// vinyl" describes. At this limit a full 4% correction takes about four
+	// seconds to apply, which the ear reads as a steady offset rather than a
+	// bend.
+	{
+		std::int64_t const maximumStep = 16;  // 16.16<<8 counts per callback
+		std::int64_t delta = s_audio.ratio_fine - s_audio.ratio_applied;
+		if (delta > maximumStep) delta = maximumStep;
+		if (delta < -maximumStep) delta = -maximumStep;
+		s_audio.ratio_applied += delta;
+	}
+	std::int64_t const ratio = s_audio.ratio_applied >> 8;
 	s_audio.ratio_ppm.store(std::int32_t((ratio * 1000000) / 65536), std::memory_order_relaxed);
 	if (ratio < 65536) s_audio.stretches.fetch_add(1, std::memory_order_relaxed);
 	else if (ratio > 65536) s_audio.shrinks.fetch_add(1, std::memory_order_relaxed);
