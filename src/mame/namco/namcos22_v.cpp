@@ -387,7 +387,11 @@ void namcos22_renderer::poly3d_drawquad(screen_device &screen, bitmap_rgb32 &bit
 	const int cz_adjust = node->data.quad.cz_adjust;
 	const int objectflags = node->data.quad.objectflags;
 
-	namcos22_object_data &extra = object_data().next();
+	// TCVR: in mode 2 nothing is queued, so poly_manager::wait() returns early and
+	// never recycles its object pool; one entry per primitive grew the overflow
+	// chain every frame until the scene walk took 60 ms. Use a local instead.
+	namcos22_object_data tcvr_local_extra;
+	namcos22_object_data &extra = (tcvr_scene_mode() >= 2) ? tcvr_local_extra : object_data().next();
 
 	extra.destbase = &bitmap;
 	extra.pfade_enabled = false;
@@ -551,7 +555,11 @@ void namcos22_renderer::poly3d_drawsprite(
 		const poly3d_t fsw = sprite_screen_width;
 		const poly3d_t fsh = sprite_screen_height;
 
-		namcos22_object_data &extra = object_data().next();
+		// TCVR: in mode 2 nothing is queued, so poly_manager::wait() returns early and
+		// never recycles its object pool; one entry per primitive grew the overflow
+		// chain every frame until the scene walk took 60 ms. Use a local instead.
+		namcos22_object_data tcvr_local_extra;
+		namcos22_object_data &extra = (tcvr_scene_mode() >= 2) ? tcvr_local_extra : object_data().next();
 		vertex_t vert[4];
 
 		extra.fadefactor = 0;
