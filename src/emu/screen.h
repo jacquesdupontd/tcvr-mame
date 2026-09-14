@@ -355,6 +355,9 @@ public:
 	device_palette_interface &palette() const override { assert(m_palette != nullptr); return *m_palette; }
 	bool has_palette() const override { return m_palette != nullptr; }
 	screen_bitmap &curbitmap() { return m_bitmap[m_curtexture]; }
+	// Native headless consumers may need the bitmap currently being rendered
+	// before the OSD swaps it to the display texture.
+	screen_bitmap &renderbitmap() { return m_bitmap[m_curbitmap]; }
 
 	// dynamic configuration
 	void configure(int width, int height, const rectangle &visarea, attotime frame_period);

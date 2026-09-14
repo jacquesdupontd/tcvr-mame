@@ -72,10 +72,10 @@ public:
 		if (!m_machine)
 			return;
 		screen_device *screen = screen_device_enumerator(m_machine->root_device()).first();
-		if (!screen || screen->curbitmap().format() != BITMAP_FORMAT_RGB32)
+		if (!screen || screen->renderbitmap().format() != BITMAP_FORMAT_RGB32)
 			return;
 
-		bitmap_rgb32 &bitmap = screen->curbitmap().as_rgb32();
+		bitmap_rgb32 &bitmap = screen->renderbitmap().as_rgb32();
 		std::lock_guard lock(s_video.mutex);
 		s_video.width = bitmap.width();
 		s_video.height = bitmap.height();
@@ -84,6 +84,14 @@ public:
 		for (int y = 0; y < s_video.height; ++y)
 			std::memcpy(s_video.pixels.data() + std::size_t(y) * s_video.stride,
 				&bitmap.pix(y), std::size_t(s_video.stride) * sizeof(std::uint32_t));
+		if (s_video.sequence == 0)
+		{
+			std::size_t nonzero = 0;
+			for (std::uint32_t pixel : s_video.pixels)
+				nonzero += (pixel & 0x00ffffffU) != 0;
+			__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_M3 first framebuffer pixels=%zu/%zu first=0x%08x",
+				nonzero, s_video.pixels.size(), s_video.pixels.empty() ? 0U : s_video.pixels.front());
+		}
 		++s_video.sequence;
 	}
 	void input_update(bool) override { }
@@ -161,6 +169,8 @@ public:
 
 	void create_custom(running_machine &machine) override
 	{
+		if (screen_device *screen = screen_device_enumerator(machine.root_device()).first())
+			screen->set_video_attributes(VIDEO_ALWAYS_UPDATE);
 		machine.add_notifier(MACHINE_NOTIFY_FRAME, machine_notify_delegate(&tcvr_machine_manager::on_frame, this));
 	}
 
@@ -248,6 +258,11 @@ extern "C" int tcvr_mame_boot_smoke(const char *driver_id, const char *rom_path,
 			height = s_video.height;
 			stride = s_video.stride;
 			sequence = s_video.sequence;
+			std::size_t nonzero = 0;
+			for (std::uint32_t pixel : s_video.pixels)
+				nonzero += (pixel & 0x00ffffffU) != 0;
+			__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_M3 final framebuffer pixels=%zu/%zu first=0x%08x",
+				nonzero, s_video.pixels.size(), s_video.pixels.empty() ? 0U : s_video.pixels.front());
 		}
 		__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_M2 boot result=%d frames=%d video=%dx%d stride=%d seq=%llu", result, *frame_count, width, height, stride, static_cast<unsigned long long>(sequence));
 		return result;
