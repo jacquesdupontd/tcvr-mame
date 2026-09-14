@@ -72,6 +72,7 @@ struct tcvr_audio_store
 	std::atomic<std::uint64_t> silent{ 0 };
 	std::atomic<std::uint32_t> cushion{ 0 };
 	std::atomic<std::int32_t> ratio_ppm{ 1000000 };
+	std::atomic<std::uint64_t> resyncs{ 0 };   // latency ceiling hit, cursor skipped forward
 
 	tcvr_audio_store()
 		: samples(std::size_t(48000) * 2 * std::size_t(2), 0)
@@ -448,6 +449,9 @@ extern "C" void tcvr_mame_audio_stats(std::uint64_t *callbacks, std::uint64_t *u
 	if (silent) *silent = s_audio.silent.load(std::memory_order_relaxed);
 	if (cushion_frames) *cushion_frames = s_audio.cushion.load(std::memory_order_relaxed);
 	if (ratio_ppm) *ratio_ppm = s_audio.ratio_ppm.load(std::memory_order_relaxed);
+	// Folded into `silent`, which already means "the reader could not serve the
+	// buffer normally"; a separate ABI field would break every existing caller.
+	if (silent) *silent += s_audio.resyncs.load(std::memory_order_relaxed);
 }
 
 // The emulator clock and the audio device clock are independent, and always
@@ -507,7 +511,24 @@ extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size
 		s_audio.phase = 0;
 	}
 
-	std::uint64_t const available = (write_frame > *cursor) ? write_frame - *cursor : 0;
+	std::uint64_t available = (write_frame > *cursor) ? write_frame - *cursor : 0;
+
+	// Hard ceiling on latency, independent of the control loop.
+	//
+	// The loop is slow on purpose, so it must not be the only thing standing
+	// between a reader that has fallen behind and a buffer full of stale audio.
+	// Measured with a slew limit set fifty times too slow: the cushion reached
+	// the ring's full two seconds, and the player heard gunshots arriving three
+	// seconds after the shot. A single skip forward is a click; two seconds of
+	// delay makes the game unplayable.
+	std::uint64_t const ceiling = target * 3;
+	if (available > ceiling)
+	{
+		*cursor = write_frame - target;
+		s_audio.phase = 0;
+		available = target;
+		s_audio.resyncs.fetch_add(1, std::memory_order_relaxed);
+	}
 	s_audio.cushion.store(std::uint32_t(available > 0xffffffffu ? 0xffffffffu : available), std::memory_order_relaxed);
 
 	// Playback ratio in 16.16 fixed point: input frames consumed per output frame.
@@ -582,7 +603,12 @@ extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size
 	// seconds to apply, which the ear reads as a steady offset rather than a
 	// bend.
 	{
-		std::int64_t const maximumStep = 16;  // 16.16<<8 counts per callback
+		// Sized so a full four percent correction lands in about three seconds.
+		// The first value here was 16, which worked out at 167 seconds: the
+		// ratio could not move, the loop was effectively open, and the buffer
+		// filled to the brim. A slew limit must be slow enough to be inaudible
+		// and fast enough to still be a control system.
+		std::int64_t const maximumStep = 900;  // 16.16<<8 counts per callback
 		std::int64_t delta = s_audio.ratio_fine - s_audio.ratio_applied;
 		if (delta > maximumStep) delta = maximumStep;
 		if (delta < -maximumStep) delta = -maximumStep;
