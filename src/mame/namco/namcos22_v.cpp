@@ -7,6 +7,11 @@
 */
 
 #include "emu.h"
+#if defined(__ANDROID__)
+#include <android/log.h>
+#include <chrono>
+#include <sys/system_properties.h>
+#endif
 #include "namcos22.h"
 
 #include "video.h"
@@ -382,7 +387,7 @@ void namcos22_renderer::poly3d_drawquad(screen_device &screen, bitmap_rgb32 &bit
 	extra.fogfactor = 0;
 
 	extra.pens = &m_state.m_palette->pen((color & 0x7f) << 8);
-	extra.primap = &screen.priority();
+	extra.primap = m_primap ? m_primap : &screen.priority();
 	extra.bn = node->data.quad.texturebank;
 	extra.cmode = node->data.quad.cmode;
 	extra.prioverchar = ((node->data.quad.cmode & 7) == 1) ? 1 : 0;
@@ -516,7 +521,7 @@ void namcos22_renderer::poly3d_drawsprite(
 		extra.flipx = flipx;
 		extra.flipy = flipy;
 		extra.pens = &m_state.m_palette->pen(gfx->colorbase() + gfx->granularity() * (color & 0x7f));
-		extra.primap = &screen.priority();
+		extra.primap = m_primap ? m_primap : &screen.priority();
 		extra.source = gfx->get_data(code % gfx->elements());
 
 		vert[0].x = fsx;
@@ -707,7 +712,8 @@ void namcos22_renderer::render_scene(screen_device &screen, bitmap_rgb32 &bitmap
 		node->data.nonleaf.next[i] = nullptr;
 	}
 
-	wait("render_scene");
+	if (!m_skip_wait)
+		wait("render_scene");
 }
 
 
@@ -2111,7 +2117,7 @@ void namcos22s_state::namcos22s_mix_text_layer(screen_device &screen, bitmap_rgb
 	{
 		u16 const *const src = &m_mix_bitmap->pix(y);
 		u32 *const dest = &bitmap.pix(y);
-		u8 const *const pri = &screen.priority().pix(y);
+		u8 const *const pri = &(m_tcvr_pri_read ? *m_tcvr_pri_read : screen.priority()).pix(y);
 		for (int x = cliprect.left(); x <= cliprect.right(); x++)
 		{
 			// skip if transparent or under poly/sprite
@@ -2566,11 +2572,90 @@ void namcos22_state::update_mixer()
 
 u32 namcos22s_state::screen_update_namcos22s(screen_device &screen, bitmap_rgb32 &bitmap, const rectangle &cliprect)
 {
+	// TCVR: the rasteriser runs ASYNCHRONOUSLY, overlapping the next frame.
+	//
+	// Measured on a Quest 3, on the emulation thread, per rendered frame:
+	// render_scene 5.8-8.3 ms out of a 16.67 ms budget, on top of ~8 ms of CPU
+	// emulation. Each fits; their sum does not once a scene gets busy. Upstream
+	// serialises them: screen_update dispatches the polygons and then WAITS for
+	// the workers before returning. Here render_scene returns as soon as the
+	// units are queued, the emulator carries on with frame N+1 while the workers
+	// finish frame N, and frame N is completed -- wait, text mix, gamma -- at the
+	// start of the next screen_update, before anything of N+1 touches shared
+	// state. The screen bitmap is already double-buffered by screen_device; the
+	// priority bitmap is not, so the driver keeps two of its own.
+	//
+	// Cost: one frame of latency on the picture, 16.7 ms, and a one-frame skew
+	// on the mixer registers and palette for the deferred text mix and gamma
+	// (the game writes them rarely, at fades and scene changes). Switchable off
+	// with debug.tcvr.asyncRender=0.
+#if defined(__ANDROID__)
+	if (!m_tcvr_async_decided)
+	{
+		char value[PROP_VALUE_MAX] = {};
+		m_tcvr_async = !(__system_property_get("debug.tcvr.asyncRender", value) > 0 && value[0] == '0');
+		m_tcvr_async_decided = true;
+		__android_log_print(ANDROID_LOG_INFO, "TCVR_MAME", "TCVR_RENDER asynchronous rasterisation %s", m_tcvr_async ? "ON" : "off");
+	}
+	using clk = std::chrono::steady_clock;
+	static long long acc_wait = 0, acc_text = 0, acc_build = 0, acc_dispatch = 0, acc_finish = 0, acc_n = 0;
+	auto const t0 = clk::now();
+#endif
+
+	auto apply_gamma = [this](bitmap_rgb32 &target, const rectangle &clip)
+	{
+		const u8 *rlut = (const u8 *)&m_mixer[0x100/4];
+		const u8 *glut = (const u8 *)&m_mixer[0x200/4];
+		const u8 *blut = (const u8 *)&m_mixer[0x300/4];
+		for (int y = clip.top(); y <= clip.bottom(); y++)
+		{
+			u32 *const dest = &target.pix(y);
+			for (int x = clip.left(); x <= clip.right(); x++)
+			{
+				const u32 rgb = dest[x];
+				const u8 r = rlut[NATIVE_ENDIAN_VALUE_LE_BE(3, 0) ^ (rgb >> 16 & 0xff)];
+				const u8 g = glut[NATIVE_ENDIAN_VALUE_LE_BE(3, 0) ^ (rgb >> 8 & 0xff)];
+				const u8 b = blut[NATIVE_ENDIAN_VALUE_LE_BE(3, 0) ^ (rgb & 0xff)];
+				dest[x] = (r << 16) | (g << 8) | b;
+			}
+		}
+	};
+
+	// ---- complete the previous frame, whose polygons were left rasterising ----
+	if (m_tcvr_async && m_tcvr_async_pending)
+	{
+		m_poly->wait("tcvr async previous frame");
+		m_tcvr_pri_read = &m_tcvr_pri[m_tcvr_pri_cur ^ 1];
+		if (BIT(m_tcvr_prev_layer, 2))
+			namcos22s_mix_text_layer(screen, *m_tcvr_prev_bitmap, cliprect, 6);
+		apply_gamma(*m_tcvr_prev_bitmap, cliprect);
+		m_tcvr_pri_read = nullptr;
+		m_tcvr_async_pending = false;
+	}
+#if defined(__ANDROID__)
+	auto const t1 = clk::now();
+#endif
+
 	render_frame_active();
 	update_mixer();
 	update_palette();
 	recalc_czram();
-	screen.priority().fill(0, cliprect);
+
+	if (m_tcvr_async)
+	{
+		if (m_tcvr_pri[0].width() != bitmap.width() || m_tcvr_pri[0].height() != bitmap.height())
+		{
+			m_tcvr_pri[0].allocate(bitmap.width(), bitmap.height());
+			m_tcvr_pri[1].allocate(bitmap.width(), bitmap.height());
+		}
+		m_tcvr_pri[m_tcvr_pri_cur].fill(0, cliprect);
+		m_poly->m_primap = &m_tcvr_pri[m_tcvr_pri_cur];
+	}
+	else
+	{
+		screen.priority().fill(0, cliprect);
+		m_poly->m_primap = nullptr;
+	}
 
 	// background color
 	rgbaint_t bg_color(0, nthbyte(m_mixer, 0x08), nthbyte(m_mixer, 0x09), nthbyte(m_mixer, 0x0a));
@@ -2584,27 +2669,49 @@ u32 namcos22s_state::screen_update_namcos22s(screen_device &screen, bitmap_rgb32
 	// layers
 	const u8 layer = nthbyte(m_mixer, 0x1f);
 	if (BIT(layer, 2)) draw_text_layer(screen, bitmap, cliprect);
+#if defined(__ANDROID__)
+	auto const t2 = clk::now();
+#endif
 	if (BIT(layer, 1)) draw_sprites();
 	if (BIT(layer, 0)) draw_polygons();
+#if defined(__ANDROID__)
+	auto const t3 = clk::now();
+#endif
+	m_poly->m_skip_wait = m_tcvr_async;
 	m_poly->render_scene(screen, bitmap);
-	if (BIT(layer, 2)) namcos22s_mix_text_layer(screen, bitmap, cliprect, 6);
+	m_poly->m_skip_wait = false;
+#if defined(__ANDROID__)
+	auto const t4 = clk::now();
+#endif
 
-	// apply gamma
-	const u8 *rlut = (const u8 *)&m_mixer[0x100/4];
-	const u8 *glut = (const u8 *)&m_mixer[0x200/4];
-	const u8 *blut = (const u8 *)&m_mixer[0x300/4];
-	for (int y = cliprect.top(); y <= cliprect.bottom(); y++)
+	if (m_tcvr_async)
 	{
-		u32 *const dest = &bitmap.pix(y);
-		for (int x = cliprect.left(); x <= cliprect.right(); x++)
-		{
-			const u32 rgb = dest[x];
-			const u8 r = rlut[NATIVE_ENDIAN_VALUE_LE_BE(3, 0) ^ (rgb >> 16 & 0xff)];
-			const u8 g = glut[NATIVE_ENDIAN_VALUE_LE_BE(3, 0) ^ (rgb >> 8 & 0xff)];
-			const u8 b = blut[NATIVE_ENDIAN_VALUE_LE_BE(3, 0) ^ (rgb & 0xff)];
-			dest[x] = (r << 16) | (g << 8) | b;
-		}
+		// Leave the workers running. This frame is finished at the top of the next.
+		m_tcvr_prev_bitmap = &bitmap;
+		m_tcvr_prev_layer = layer;
+		m_tcvr_async_pending = true;
+		m_tcvr_pri_cur ^= 1;
 	}
+	else
+	{
+		if (BIT(layer, 2)) namcos22s_mix_text_layer(screen, bitmap, cliprect, 6);
+		apply_gamma(bitmap, cliprect);
+	}
+
+#if defined(__ANDROID__)
+	auto const t5 = clk::now();
+	auto us = [](clk::time_point a, clk::time_point b) { return std::chrono::duration_cast<std::chrono::microseconds>(b - a).count(); };
+	acc_wait += us(t0, t1); acc_text += us(t1, t2); acc_build += us(t2, t3); acc_dispatch += us(t3, t4); acc_finish += us(t4, t5);
+	if (++acc_n >= 60)
+	{
+		__android_log_print(ANDROID_LOG_INFO, "TCVR_MAME",
+			"TCVR_RENDER main-thread ms/frame: wait+finish-prev %.2f text %.2f build %.2f dispatch %.2f finish %.2f = %.2f of 16.67 (async %s)",
+			acc_wait / 1000.0 / acc_n, acc_text / 1000.0 / acc_n, acc_build / 1000.0 / acc_n,
+			acc_dispatch / 1000.0 / acc_n, acc_finish / 1000.0 / acc_n,
+			(acc_wait + acc_text + acc_build + acc_dispatch + acc_finish) / 1000.0 / acc_n, m_tcvr_async ? "ON" : "off");
+		acc_wait = acc_text = acc_build = acc_dispatch = acc_finish = acc_n = 0;
+	}
+#endif
 
 	return 0;
 }
@@ -2621,9 +2728,35 @@ u32 namcos22_state::screen_update_namcos22(screen_device &screen, bitmap_rgb32 &
 	bitmap.fill(m_palette->pen(bg_color), cliprect);
 
 	// layers
+#if defined(__ANDROID__)
+	// TCVR: where does the main thread's render time go? Measured, not guessed.
+	// Three phases: building the scene from point RAM, rasterising (the main
+	// thread also works the queue while it waits), and the serial per-pixel
+	// text mix + fade + gamma. Logged once per sixty rendered frames.
+	using clk = std::chrono::steady_clock;
+	static long long acc_poly = 0, acc_scene = 0, acc_text = 0, acc_n = 0;
+	auto const t0 = clk::now();
+	draw_polygons();
+	auto const t1 = clk::now();
+	m_poly->render_scene(screen, bitmap);
+	auto const t2 = clk::now();
+	draw_text_layer(screen, bitmap, cliprect); // text layer + final mix
+	auto const t3 = clk::now();
+	acc_poly += std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+	acc_scene += std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+	acc_text += std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count();
+	if (++acc_n >= 60)
+	{
+		__android_log_print(ANDROID_LOG_INFO, "TCVR_MAME",
+			"TCVR_RENDER main-thread per frame: draw_polygons %.2f ms, render_scene %.2f ms, text+fade+gamma %.2f ms (frame budget 16.67)",
+			acc_poly / 1000.0 / acc_n, acc_scene / 1000.0 / acc_n, acc_text / 1000.0 / acc_n);
+		acc_poly = acc_scene = acc_text = acc_n = 0;
+	}
+#else
 	draw_polygons();
 	m_poly->render_scene(screen, bitmap);
 	draw_text_layer(screen, bitmap, cliprect); // text layer + final mix
+#endif
 
 	return 0;
 }

@@ -155,6 +155,15 @@ public:
 	namcos22_renderer(namcos22_state &state);
 
 	void render_scene(screen_device &screen, bitmap_rgb32 &bitmap);
+
+	// TCVR asynchronous rasterisation. When m_skip_wait is set, render_scene
+	// leaves the work units running and the driver waits for them at the start
+	// of the next frame, so the rasteriser overlaps the emulation of the next
+	// frame instead of serialising with it. m_primap points the rasteriser at a
+	// priority bitmap owned by the driver (double-buffered) instead of the
+	// screen's single one, which the in-flight frame and the next would share.
+	bool m_skip_wait = false;
+	bitmap_ind8 *m_primap = nullptr;
 	struct namcos22_scenenode *new_scenenode(running_machine &machine, u32 zsort, namcos22_scenenode_type type);
 
 	void init();
@@ -492,6 +501,16 @@ protected:
 	std::unique_ptr<s32[]> m_pointrom;
 	std::unique_ptr<u8[]> m_dirtypal;
 	std::unique_ptr<bitmap_ind16> m_mix_bitmap;
+
+	// TCVR asynchronous rasterisation state (see screen_update_namcos22s).
+	bool m_tcvr_async = false;
+	bool m_tcvr_async_decided = false;
+	bool m_tcvr_async_pending = false;
+	bitmap_ind8 m_tcvr_pri[2];
+	int m_tcvr_pri_cur = 0;
+	bitmap_ind8 *m_tcvr_pri_read = nullptr;
+	bitmap_rgb32 *m_tcvr_prev_bitmap = nullptr;
+	u8 m_tcvr_prev_layer = 0;
 
 	tilemap_t *m_text_tilemap;
 	u16 m_tilemapattr[8] = { };
