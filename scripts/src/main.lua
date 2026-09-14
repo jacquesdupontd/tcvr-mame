@@ -10,6 +10,7 @@
 ---------------------------------------------------------------------------
 
 function mainProject(_target, _subtarget)
+local tcvr_native_core = (_OPTIONS["osd"] == "tcvr")
 local projname
 if (_OPTIONS["SOURCES"] == nil) and (_OPTIONS["SOURCEFILTER"] == nil) then
 	if (_target == _subtarget) then
@@ -22,9 +23,13 @@ else
 end
 	project (projname)
 	uuid (os.uuid(_target .. "_" .. _subtarget))
-	kind "ConsoleApp"
+	if tcvr_native_core then
+		kind "SharedLib"
+	else
+		kind "ConsoleApp"
+	end
 
-	configuration { "android*" }
+	configuration { "android*", "not tcvr" }
 		targetprefix "lib"
 		targetname "main"
 		targetextension ".so"
@@ -40,6 +45,11 @@ end
 		}
 
 	configuration {  }
+	if tcvr_native_core then
+		targetprefix "lib"
+		targetname "tcvr_mame"
+		targetextension ".so"
+	end
 
 	addprojectflags()
 	flags {
@@ -88,7 +98,7 @@ end
 
 	configuration { }
 
-	if _OPTIONS["targetos"]=="android" then
+	if _OPTIONS["targetos"]=="android" and not tcvr_native_core then
 		files {
 			MAME_DIR .. "src/osd/sdl3/android_main.cpp",
 		}
@@ -115,7 +125,7 @@ end
 				os.copyfile(androidToolchainRoot() .. "/sysroot/usr/lib/x86_64-linux-android/libc++_shared.so", MAME_DIR .. "android-project/app/src/main/libs/x86_64/libc++_shared.so")
 			end
 		end
-	else
+	elseif not tcvr_native_core then
 		if _OPTIONS["SEPARATE_BIN"]~="1" then
 			targetdir(MAME_DIR)
 		end
@@ -124,7 +134,7 @@ end
 if (STANDALONE~=true) then
 	findfunction("linkProjects_" .. _OPTIONS["target"] .. "_" .. _OPTIONS["subtarget"])(_OPTIONS["target"], _OPTIONS["subtarget"])
 end
-if (STANDALONE~=true) then
+if (STANDALONE~=true) and not tcvr_native_core then
 	links {
 		"frontend",
 	}
@@ -168,7 +178,7 @@ if CPU_INCLUDE_DRC_NATIVE then
 		"asmjit",
 	}
 end
-if (STANDALONE~=true) then
+if (STANDALONE~=true) and not tcvr_native_core then
 	links {
 		ext_lib("lua"),
 		"lualibs",
@@ -181,13 +191,13 @@ end
 		ext_lib("flac"),
 		ext_lib("utf8proc"),
 	}
-if (STANDALONE~=true) then
+if (STANDALONE~=true) and not tcvr_native_core then
 	links {
 		ext_lib("sqlite3"),
 	}
 end
 
-	if _OPTIONS["NO_USE_PORTAUDIO"]~="1" then
+	if not tcvr_native_core and _OPTIONS["NO_USE_PORTAUDIO"]~="1" then
 		links {
 			ext_lib("portaudio"),
 		}
@@ -197,17 +207,21 @@ end
 			}
 		end
 	end
-	if _OPTIONS["NO_USE_MIDI"]~="1" then
+	if not tcvr_native_core and _OPTIONS["NO_USE_MIDI"]~="1" then
 		links {
 			ext_lib("portmidi"),
 		}
 	end
-	links {
-		"bgfx",
-		"bimg",
-		"bx",
-		"ocore_" .. _OPTIONS["osd"],
-	}
+	if not tcvr_native_core then
+		links {
+			"bgfx",
+			"bimg",
+			"bx",
+			"ocore_" .. _OPTIONS["osd"],
+		}
+	else
+		links { "ocore_tcvr" }
+	end
 
 	override_resources = false;
 

@@ -1167,8 +1167,28 @@ android-ndk:
 ifndef ANDROID_NDK_HOME
 	$(error ANDROID_NDK_HOME is not set)
 endif
+
 ifndef SDL_INSTALL_ROOT
 	$(error SDL_INSTALL_ROOT is not set)
+endif
+ifeq ($(OS),windows)
+	$(eval CLANG_VERSION := $(shell $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/windows-x86_64/bin/clang -dumpversion 2> /dev/null))
+else ifeq ($(OS),linux)
+	$(eval CLANG_VERSION := $(shell $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/linux-x86_64/bin/clang -dumpversion 2> /dev/null))
+else ifeq ($(OS),macosx)
+	$(eval CLANG_VERSION := $(shell $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang -dumpversion 2> /dev/null))
+else
+	$(error Unsupported Android build platform)
+endif
+
+#-------------------------------------------------
+# tcvr-android-ndk - native core only, no SDL frontend
+#-------------------------------------------------
+
+.PHONY: tcvr-android-ndk
+tcvr-android-ndk:
+ifndef ANDROID_NDK_HOME
+	$(error ANDROID_NDK_HOME is not set)
 endif
 ifeq ($(OS),windows)
 	$(eval CLANG_VERSION := $(shell $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/windows-x86_64/bin/clang -dumpversion 2> /dev/null))
@@ -1203,6 +1223,19 @@ $(PROJECTDIR_SDL)/$(MAKETYPE)-android-arm64/Makefile: makefile $(SCRIPTS) $(GENI
 android-arm64: android-ndk generate $(PROJECTDIR_SDL)/$(MAKETYPE)-android-arm64/Makefile
 	$(SILENT) $(MAKE) $(MAKEPARAMS) -C $(PROJECTDIR_SDL)/$(MAKETYPE)-android-arm64 config=$(CONFIG) precompile
 	$(SILENT) $(MAKE) $(MAKEPARAMS) -C $(PROJECTDIR_SDL)/$(MAKETYPE)-android-arm64 config=$(CONFIG)
+
+#-------------------------------------------------
+# tcvr-android-arm64 - ARM64 shared library, no SDL/Qt/frontend
+#-------------------------------------------------
+
+PROJECTDIR_TCVR := $(BUILDDIR)/projects/tcvr/$(FULLTARGET)
+
+$(PROJECTDIR_TCVR)/$(MAKETYPE)-android-arm64/Makefile: makefile $(SCRIPTS) $(GENIE)
+	$(SILENT) $(GENIE) $(PARAMS) --gcc=android-arm64 --gcc_version=$(CLANG_VERSION) --osd=tcvr --targetos=android --PLATFORM=arm64 --NOASM=1 $(MAKETYPE)
+
+.PHONY: tcvr-android-arm64
+tcvr-android-arm64: tcvr-android-ndk generate $(PROJECTDIR_TCVR)/$(MAKETYPE)-android-arm64/Makefile
+	$(SILENT) $(MAKE) $(MAKEPARAMS) -C $(PROJECTDIR_TCVR)/$(MAKETYPE)-android-arm64 config=$(CONFIG) tcvr
 
 #-------------------------------------------------
 # android-x86
