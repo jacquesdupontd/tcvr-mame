@@ -33,6 +33,36 @@ struct tcvr_video_store
 
 tcvr_video_store s_video;
 
+struct tcvr_audio_store
+{
+	std::mutex mutex;
+	std::vector<std::int16_t> samples;
+	std::uint64_t write_frame = 0;
+	int rate = 48000;
+	int channels = 2;
+
+	tcvr_audio_store()
+		: samples(std::size_t(48000) * 2 * std::size_t(2), 0)
+	{
+	}
+
+	void push(std::int16_t const *source, int frames)
+	{
+		if (!source || frames <= 0)
+			return;
+		std::lock_guard lock(mutex);
+		for (int frame = 0; frame < frames; ++frame)
+		{
+			std::size_t const slot = ((write_frame + std::uint64_t(frame)) % (samples.size() / channels)) * channels;
+			for (int channel = 0; channel < channels; ++channel)
+				samples[slot + channel] = source[frame * channels + channel];
+		}
+		write_frame += std::uint64_t(frames);
+	}
+};
+
+tcvr_audio_store s_audio;
+
 class tcvr_osd final : public osd_interface
 {
 public:
@@ -61,15 +91,39 @@ public:
 	void set_verbose(bool) override { }
 	void init_debugger() override { }
 	void wait_for_debugger(device_t &, bool) override { }
-	bool no_sound() override { return true; }
+	bool no_sound() override { return false; }
 	bool sound_external_per_channel_volume() override { return false; }
 	bool sound_split_streams_per_source() override { return false; }
 	uint32_t sound_get_generation() override { return 1; }
-	osd::audio_info sound_get_information() override { return {}; }
-	uint32_t sound_stream_sink_open(uint32_t, std::string, uint32_t) override { return 0; }
+	osd::audio_info sound_get_information() override
+	{
+		osd::audio_info result;
+		result.m_generation = 1;
+		result.m_default_sink = 1;
+		result.m_default_source = 0;
+		osd::audio_info::node_info node;
+		node.m_name = "tcvr-aaudio";
+		node.m_display_name = "ArcadeXR audio";
+		node.m_id = 1;
+		node.m_rate = osd::audio_rate_range{ 48000, 48000, 48000 };
+		node.m_sinks = 2;
+		node.m_sources = 0;
+		node.m_port_names = { "FL", "FR" };
+		node.m_port_positions = { osd::channel_position::FL(), osd::channel_position::FR() };
+		result.m_nodes.push_back(std::move(node));
+		return result;
+	}
+	uint32_t sound_stream_sink_open(uint32_t, std::string, uint32_t rate) override
+	{
+		s_audio.rate = int(rate);
+		return 1;
+	}
 	uint32_t sound_stream_source_open(uint32_t, std::string, uint32_t) override { return 0; }
 	void sound_stream_close(uint32_t) override { }
-	void sound_stream_sink_update(uint32_t, int16_t const *, int) override { }
+	void sound_stream_sink_update(uint32_t, int16_t const *buffer, int samples_this_frame) override
+	{
+		s_audio.push(buffer, samples_this_frame);
+	}
 	void sound_stream_source_update(uint32_t, int16_t *, int) override { }
 	void sound_stream_set_volumes(uint32_t, std::vector<float> const &) override { }
 	void sound_begin_update() override { }
@@ -225,4 +279,36 @@ extern "C" std::size_t tcvr_mame_copy_latest_video(std::uint32_t *destination, s
 	std::size_t const count = std::min(destination_pixels, s_video.pixels.size());
 	std::memcpy(destination, s_video.pixels.data(), count * sizeof(std::uint32_t));
 	return count;
+}
+
+extern "C" int tcvr_mame_audio_info(int *rate, int *channels, std::uint64_t *write_frame)
+{
+	if (!rate || !channels || !write_frame)
+		return 0;
+	std::lock_guard lock(s_audio.mutex);
+	*rate = s_audio.rate;
+	*channels = s_audio.channels;
+	*write_frame = s_audio.write_frame;
+	return 1;
+}
+
+extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size_t destination_frames, std::uint64_t *cursor)
+{
+	if (!destination || !cursor || !destination_frames)
+		return 0;
+	std::lock_guard lock(s_audio.mutex);
+	std::size_t const capacity = s_audio.samples.size() / std::size_t(s_audio.channels);
+	std::uint64_t const oldest = (s_audio.write_frame > capacity) ? s_audio.write_frame - capacity : 0;
+	if (*cursor < oldest)
+		*cursor = oldest;
+	std::uint64_t const available = s_audio.write_frame - *cursor;
+	std::size_t const frames = std::min<std::size_t>(destination_frames, std::size_t(available));
+	for (std::size_t frame = 0; frame < frames; ++frame)
+	{
+		std::size_t const slot = ((*cursor + frame) % capacity) * std::size_t(s_audio.channels);
+		std::memcpy(destination + frame * std::size_t(s_audio.channels), s_audio.samples.data() + slot,
+			std::size_t(s_audio.channels) * sizeof(std::int16_t));
+	}
+	*cursor += frames;
+	return frames;
 }
