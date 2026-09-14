@@ -7,6 +7,7 @@
 #include "main.h"
 #include "osdepend.h"
 #include "rendlay.h"
+#include "render.h"
 
 #include "ui/uimain.h"
 
@@ -66,6 +67,9 @@ struct tcvr_video_store
 	std::atomic<int> published_width{ 0 };
 	std::atomic<int> published_height{ 0 };
 	std::atomic<int> published_stride{ 0 };
+	std::uint64_t capture_us = 0;
+	std::uint64_t capture_worst_us = 0;
+	std::uint64_t capture_frames = 0;
 };
 
 tcvr_video_store s_video;
@@ -156,6 +160,10 @@ public:
 
 		bitmap_rgb32 &bitmap = screen->renderbitmap().as_rgb32();
 		rectangle const visible = screen->visible_area();
+		// How much of the emulation thread does OUR capture actually take? It
+		// copies 1.2 MB under a mutex sixty times a second, on the one thread
+		// whose speed is the whole problem. That has never been measured.
+		auto const captureStart = std::chrono::steady_clock::now();
 		std::lock_guard lock(s_video.mutex);
 		// renderbitmap includes System22 CRT overscan. Export MAME's declared
 		// visible area only, so the arcade image fills the XR presentation plane.
@@ -181,6 +189,26 @@ public:
 		s_video.published_height.store(s_video.height, std::memory_order_relaxed);
 		s_video.published_stride.store(s_video.stride, std::memory_order_relaxed);
 		s_video.published_sequence.store(s_video.sequence, std::memory_order_release);
+
+		{
+			auto const took = std::chrono::duration_cast<std::chrono::microseconds>(
+				std::chrono::steady_clock::now() - captureStart).count();
+			s_video.capture_us += std::uint64_t(took);
+			if (std::uint64_t(took) > s_video.capture_worst_us)
+				s_video.capture_worst_us = std::uint64_t(took);
+			if (++s_video.capture_frames >= 60)
+			{
+				__android_log_print(ANDROID_LOG_INFO, kLogTag,
+					"TCVR_SOUND framebuffer capture: mean %.2f ms, worst %.2f ms over %llu frames"
+					" (a frame is 16.67 ms)",
+					double(s_video.capture_us) / double(s_video.capture_frames) / 1000.0,
+					double(s_video.capture_worst_us) / 1000.0,
+					(unsigned long long)s_video.capture_frames);
+				s_video.capture_us = 0;
+				s_video.capture_worst_us = 0;
+				s_video.capture_frames = 0;
+			}
+		}
 	}
 	void input_update(bool) override { }
 	void check_osd_inputs() override { }
@@ -328,22 +356,46 @@ public:
 		// for that was reading renderbitmap() instead of curbitmap(), which is
 		// what the capture does now. Kept behind a property so the two can be
 		// compared rather than argued about.
-		// Default ON. Without it this headless OSD never gets a screen update at
-		// all and the framebuffer stays black -- verified again the moment it was
-		// defaulted off. Frameskip is therefore pursued by other means; this flag
-		// exists so the two can be compared, not so it can be left off.
-		const bool alwaysUpdate = property_flag("debug.tcvr.alwaysUpdate", true);
+		// Give MAME a render target, then let it skip frames.
+		//
+		// screen.cpp guards the screen update with TWO conditions, and only the
+		// first is obvious:
+		//
+		//     if (!(m_video_attributes & VIDEO_ALWAYS_UPDATE)) {
+		//         if (machine().video().skip_this_frame()) return false;
+		//         if (!machine().render().is_live(*this))    return false;
+		//     }
+		//
+		// A headless OSD has no render target, so is_live() is false and the
+		// screen is never updated at all -- which is why simply dropping
+		// VIDEO_ALWAYS_UPDATE blacked out the framebuffer rather than enabling
+		// frameskip. Allocating a target makes the screen live, and MAME then
+		// skips frames the ordinary way when it falls behind: the simulation and
+		// the sound keep their original timing, only the picture skips. A skipped
+		// picture is invisible here, because the XR renderer presents the last
+		// image it has a hundred and twenty times a second regardless.
+		//
+		// This matters far beyond the picture. The emulator produced 49 blocks of
+		// audio per second instead of 50 on heavy scenes, and no amount of work
+		// in the audio reader can conjure the missing block.
+		m_render_target = machine.render().target_alloc();
+		const bool alwaysUpdate = property_flag("debug.tcvr.alwaysUpdate", false);
 		if (screen_device *screen = screen_device_enumerator(machine.root_device()).first())
 		{
 			if (alwaysUpdate)
 				screen->set_video_attributes(VIDEO_ALWAYS_UPDATE);
-			__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_SOUND alwaysUpdate=%d", alwaysUpdate ? 1 : 0);
+			__android_log_print(ANDROID_LOG_INFO, kLogTag,
+				"TCVR_SOUND alwaysUpdate=%d renderTarget=%p screenLive=%d",
+				alwaysUpdate ? 1 : 0, (void *)m_render_target,
+				machine.render().is_live(*screen) ? 1 : 0);
 		}
 		machine.add_notifier(MACHINE_NOTIFY_FRAME, machine_notify_delegate(&tcvr_machine_manager::on_frame, this));
 		m_machine = &machine;
 	}
 
 private:
+	render_target *m_render_target = nullptr;
+
 	void on_frame()
 	{
 		if (m_machine)
