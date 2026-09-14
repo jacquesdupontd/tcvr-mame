@@ -63,6 +63,19 @@ struct tcvr_audio_store
 
 tcvr_audio_store s_audio;
 
+struct tcvr_input_store
+{
+	std::mutex mutex;
+	bool coin = false;
+	bool start = false;
+	bool trigger = false;
+	bool pedal = false;
+	float gun_x = 0.5f;
+	float gun_y = 0.5f;
+};
+
+tcvr_input_store s_input;
+
 class tcvr_osd final : public osd_interface
 {
 public:
@@ -172,17 +185,60 @@ public:
 		if (screen_device *screen = screen_device_enumerator(machine.root_device()).first())
 			screen->set_video_attributes(VIDEO_ALWAYS_UPDATE);
 		machine.add_notifier(MACHINE_NOTIFY_FRAME, machine_notify_delegate(&tcvr_machine_manager::on_frame, this));
+		m_machine = &machine;
 	}
 
 private:
 	void on_frame()
 	{
+		if (m_machine)
+		{
+			bool coin, start, trigger, pedal;
+			float gun_x, gun_y;
+			{
+				std::lock_guard lock(s_input.mutex);
+				coin = s_input.coin;
+				start = s_input.start;
+				trigger = s_input.trigger;
+				pedal = s_input.pedal;
+				gun_x = s_input.gun_x;
+				gun_y = s_input.gun_y;
+			}
+			ioport_list const &ports = m_machine->ioport().ports();
+			auto find_port = [&ports](char const *tag) -> ioport_port *
+			{
+				auto const it = ports.find(tag);
+				return (it == ports.end()) ? nullptr : it->second.get();
+			};
+			auto set_button = [&find_port](char const *tag, ioport_value mask, bool pressed)
+			{
+				if (ioport_port *port = find_port(tag))
+					if (ioport_field *field = port->field(mask))
+						field->set_value(pressed ? 0 : field->defvalue());
+			};
+			auto set_axis = [&find_port](char const *tag, float normalized)
+			{
+				if (ioport_port *port = find_port(tag))
+					if (ioport_field *field = port->field(0xffff))
+					{
+						ioport_value const range = field->maxval() - field->minval();
+						field->set_value(field->minval() + ioport_value(std::clamp(normalized, 0.0f, 1.0f) * float(range)));
+					}
+			};
+			set_button("INPUTS", 0x0001, coin);
+			set_button("INPUTS", 0x0010, trigger);
+			set_button("INPUTS", 0x0020, pedal);
+			set_axis("OPT.0", gun_x);
+			set_axis("OPT.1", gun_y);
+			set_button("INPUTS", 0x0100, start);
+		}
 		++m_frame_count;
 		if (m_frame_count == 1)
 			__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_M2 first emulated video frame");
 	}
 
 	int &m_frame_count;
+	running_machine *m_machine = nullptr;
 	std::unique_ptr<ui_manager> m_ui;
 };
 
@@ -326,4 +382,30 @@ extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size
 	}
 	*cursor += frames;
 	return frames;
+}
+
+extern "C" void tcvr_mame_set_digital(char const *id, bool pressed)
+{
+	if (!id)
+		return;
+	std::lock_guard lock(s_input.mutex);
+	if (!std::strcmp(id, "coin"))
+		s_input.coin = pressed;
+	else if (!std::strcmp(id, "start"))
+		s_input.start = pressed;
+	else if (!std::strcmp(id, "trigger"))
+		s_input.trigger = pressed;
+	else if (!std::strcmp(id, "pedal"))
+		s_input.pedal = pressed;
+}
+
+extern "C" void tcvr_mame_set_analog(char const *id, float value)
+{
+	if (!id)
+		return;
+	std::lock_guard lock(s_input.mutex);
+	if (!std::strcmp(id, "gun_x"))
+		s_input.gun_x = value;
+	else if (!std::strcmp(id, "gun_y"))
+		s_input.gun_y = value;
 }
