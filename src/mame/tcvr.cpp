@@ -13,6 +13,8 @@
 #include <android/log.h>
 
 #include <cstring>
+#include <cstdlib>
+#include <sys/system_properties.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -22,6 +24,26 @@
 namespace {
 
 constexpr char kLogTag[] = "TCVR_MAME";
+
+// __system_property_get writes an EMPTY string and returns 0 when the property
+// does not exist, so passing a pre-filled buffer as a "default" silently loses
+// it. That mistake turned VIDEO_ALWAYS_UPDATE off on a build meant to keep it
+// on, and the screen went black.
+inline bool property_flag(const char *name, bool fallback)
+{
+	char value[PROP_VALUE_MAX] = {};
+	if (__system_property_get(name, value) <= 0)
+		return fallback;
+	return value[0] == '1' || value[0] == 'y' || value[0] == 't';
+}
+
+inline int property_int(const char *name, int fallback)
+{
+	char value[PROP_VALUE_MAX] = {};
+	if (__system_property_get(name, value) <= 0)
+		return fallback;
+	return atoi(value);
+}
 
 struct tcvr_video_store
 {
@@ -56,6 +78,11 @@ struct tcvr_audio_store
 	int channels = 2;
 	// Consumer-only state, touched exclusively by the AAudio callback.
 	bool primed = false;
+	bool started = false;                 // has anything ever been played?
+	int last_push_frames = -1;            // to notice the producer changing cadence
+	std::chrono::steady_clock::time_point last_push_at{};
+	std::atomic<std::uint64_t> stalls{ 0 };
+	std::atomic<std::uint32_t> worst_gap_ms{ 0 };
 	std::uint32_t phase = 0;              // 0.16 fixed-point resampler phase
 	std::int64_t ratio_fine = std::int64_t(65536) << 8;  // 16.16 << 8, smoothed playback ratio
 	std::int64_t ratio_applied = std::int64_t(65536) << 8;  // slew-limited output ratio
@@ -178,8 +205,15 @@ public:
 		result.m_nodes.push_back(std::move(node));
 		return result;
 	}
-	uint32_t sound_stream_sink_open(uint32_t, std::string, uint32_t rate) override
+	uint32_t sound_stream_sink_open(uint32_t node, std::string name, uint32_t rate) override
 	{
+		// Reported because the failure the player describes happens "at exactly
+		// the same place" in the game -- which is the signature of something the
+		// GAME does, not of scheduling. A stream reopened at a different rate
+		// mid-play would do exactly that, and would be invisible otherwise.
+		__android_log_print(ANDROID_LOG_INFO, kLogTag,
+			"TCVR_SOUND sink_open node=%u name=%s rate=%u (previous rate=%d)",
+			node, name.c_str(), rate, s_audio.rate);
 		s_audio.rate = int(rate);
 		return 1;
 	}
@@ -187,6 +221,37 @@ public:
 	void sound_stream_close(uint32_t) override { }
 	void sound_stream_sink_update(uint32_t, int16_t const *buffer, int samples_this_frame) override
 	{
+		// Does the PRODUCER stop, or does the consumer merely fall behind? Those
+		// two need completely different fixes and every attempt so far assumed
+		// the second. Measure the wall-clock gap between pushes: MAME emits
+		// 960 frames at a time, so a healthy gap is 20 ms and anything past 40
+		// means the emulation loop itself stalled -- and no audio existed to be
+		// played, whatever the reader did.
+		{
+			auto const now = std::chrono::steady_clock::now();
+			if (s_audio.last_push_at.time_since_epoch().count() != 0)
+			{
+				auto const gap = std::chrono::duration_cast<std::chrono::milliseconds>(
+					now - s_audio.last_push_at).count();
+				if (gap > 40)
+				{
+					s_audio.stalls.fetch_add(1, std::memory_order_relaxed);
+					__android_log_print(ANDROID_LOG_WARN, kLogTag,
+						"TCVR_SOUND producer stalled %lld ms (healthy is 20) totalStalls=%llu",
+						(long long)gap,
+						(unsigned long long)s_audio.stalls.load(std::memory_order_relaxed));
+				}
+				if (gap > s_audio.worst_gap_ms.load(std::memory_order_relaxed))
+					s_audio.worst_gap_ms.store(std::uint32_t(gap), std::memory_order_relaxed);
+			}
+			s_audio.last_push_at = now;
+		}
+		if (samples_this_frame != s_audio.last_push_frames)
+		{
+			__android_log_print(ANDROID_LOG_INFO, kLogTag,
+				"TCVR_SOUND push size changed %d -> %d frames", s_audio.last_push_frames, samples_this_frame);
+			s_audio.last_push_frames = samples_this_frame;
+		}
 		s_audio.push(buffer, samples_this_frame);
 	}
 	void sound_stream_source_update(uint32_t, int16_t *, int) override { }
@@ -226,8 +291,29 @@ public:
 
 	void create_custom(running_machine &machine) override
 	{
+		// VIDEO_ALWAYS_UPDATE forces the screen update -- and therefore the whole
+		// System 22 rasterisation -- on every single frame, which is precisely
+		// what stops MAME from ever skipping one. On a heavy scene the emulation
+		// loop then has no way to catch up: it runs late, and since the sound is
+		// generated from that same loop, the audio runs late with it. That is the
+		// mechanism behind a dropout that happens "at exactly the same place"
+		// every time, which is the clue that made it findable.
+		//
+		// It was originally added to fix a black framebuffer, but the real fix
+		// for that was reading renderbitmap() instead of curbitmap(), which is
+		// what the capture does now. Kept behind a property so the two can be
+		// compared rather than argued about.
+		// Default ON. Without it this headless OSD never gets a screen update at
+		// all and the framebuffer stays black -- verified again the moment it was
+		// defaulted off. Frameskip is therefore pursued by other means; this flag
+		// exists so the two can be compared, not so it can be left off.
+		const bool alwaysUpdate = property_flag("debug.tcvr.alwaysUpdate", true);
 		if (screen_device *screen = screen_device_enumerator(machine.root_device()).first())
-			screen->set_video_attributes(VIDEO_ALWAYS_UPDATE);
+		{
+			if (alwaysUpdate)
+				screen->set_video_attributes(VIDEO_ALWAYS_UPDATE);
+			__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_SOUND alwaysUpdate=%d", alwaysUpdate ? 1 : 0);
+		}
 		machine.add_notifier(MACHINE_NOTIFY_FRAME, machine_notify_delegate(&tcvr_machine_manager::on_frame, this));
 		m_machine = &machine;
 	}
@@ -370,6 +456,19 @@ extern "C" int tcvr_mame_boot_smoke(const char *driver_id, const char *rom_path,
 		options.set_value(OPTION_READCONFIG, 0, OPTION_PRIORITY_MAXIMUM);
 		options.set_value(OPTION_WRITECONFIG, 0, OPTION_PRIORITY_MAXIMUM);
 		options.set_value(OPTION_NVRAM_SAVE, 0, OPTION_PRIORITY_MAXIMUM);
+		// Let MAME drop a video frame rather than fall behind. The simulation and
+		// the sound keep their original timing; only the picture skips, and a
+		// skipped picture is invisible here because the XR renderer already
+		// presents the last image it has, a hundred and twenty times a second,
+		// independently of the arcade clock.
+		{
+			const bool autoskip = property_flag("debug.tcvr.autoframeskip", true);
+			const int fixedskip = property_int("debug.tcvr.frameskip", 0);
+			options.set_value(OPTION_AUTOFRAMESKIP, autoskip, OPTION_PRIORITY_MAXIMUM);
+			options.set_value(OPTION_FRAMESKIP, fixedskip, OPTION_PRIORITY_MAXIMUM);
+			__android_log_print(ANDROID_LOG_INFO, kLogTag,
+				"TCVR_SOUND autoframeskip=%d frameskip=%d", autoskip ? 1 : 0, fixedskip);
+		}
 
 		tcvr_osd osd;
 		tcvr_machine_manager manager(options, osd, *frame_count);
@@ -452,6 +551,12 @@ extern "C" void tcvr_mame_audio_stats(std::uint64_t *callbacks, std::uint64_t *u
 	// Folded into `silent`, which already means "the reader could not serve the
 	// buffer normally"; a separate ABI field would break every existing caller.
 	if (silent) *silent += s_audio.resyncs.load(std::memory_order_relaxed);
+	// Producer stalls ride along in `stretches`, which no longer means anything
+	// on its own now that the resampler is continuous; the log line is the real
+	// report. Encoded as stalls * 1000000 + worst gap so one number carries both.
+	if (stretches)
+		*stretches = s_audio.stalls.load(std::memory_order_relaxed) * 1000000ull +
+			s_audio.worst_gap_ms.load(std::memory_order_relaxed);
 }
 
 // The emulator clock and the audio device clock are independent, and always
@@ -483,21 +588,50 @@ extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size
 
 	// The cushion we aim to keep between the emulator and the speaker: enough to
 	// ride out a slow frame, short enough not to be felt as lag.
-	std::uint64_t const target = std::uint64_t(s_audio.rate) * 80u / 1000u;
+	// 120 ms. At 80 ms a single emulator stumble emptied it; the extra 40 ms of
+	// latency is well under what a gunshot's delay would make noticeable, and it
+	// buys roughly half a second more tolerance to a speed dip.
+	std::uint64_t const target = std::uint64_t(s_audio.rate) * 120u / 1000u;
 
 	s_audio.callbacks.fetch_add(1, std::memory_order_relaxed);
 
 	if (!s_audio.primed)
 	{
-		if (write_frame < target)
+		if (!s_audio.started)
 		{
-			s_audio.silent.fetch_add(1, std::memory_order_relaxed);
-			return 0;  // still filling; silence is correct here, and brief
+			// First fill. Nothing has been heard yet, so starting a cushion's
+			// worth behind the writer costs nothing.
+			if (write_frame < target)
+			{
+				s_audio.silent.fetch_add(1, std::memory_order_relaxed);
+				return 0;
+			}
+			*cursor = write_frame - target;
+			s_audio.started = true;
 		}
-		*cursor = write_frame - target;
+		else
+		{
+			// Re-priming after an underrun. The listener has ALREADY HEARD
+			// everything up to the cursor, so moving it back to build a cushion
+			// replays that audio -- which is the echo the player reported after
+			// every dropout. Wait for the producer to get ahead of where we
+			// stopped instead, and resume from exactly there: nothing repeated,
+			// nothing skipped.
+			if (write_frame < *cursor + target)
+			{
+				s_audio.silent.fetch_add(1, std::memory_order_relaxed);
+				return 0;
+			}
+		}
 		s_audio.phase = 0;
-		s_audio.ratio_fine = std::int64_t(s_audio.rate_measured) << 8;
-		s_audio.ratio_applied = s_audio.ratio_fine;
+		// Do not touch the ratio here at all.
+		//
+		// Seeding it from the measured rate looked reasonable and was the source
+		// of the "voice pitching downwards": the rate measured DURING a stall can
+		// be 0.88, and seeding the filter with it sent the applied ratio sliding
+		// twelve percent down over the next several seconds. Every other path
+		// clamps the aim to +/-4%, so leaving the loop alone keeps the ratio
+		// inside that band by construction, whatever the stall measured.
 		s_audio.rate_last_write = write_frame;
 		s_audio.rate_output = 0;
 		s_audio.primed = true;
@@ -521,7 +655,7 @@ extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size
 	// the ring's full two seconds, and the player heard gunshots arriving three
 	// seconds after the shot. A single skip forward is a click; two seconds of
 	// delay makes the game unplayable.
-	std::uint64_t const ceiling = target * 3;
+	std::uint64_t const ceiling = target * 2;   // 240 ms, hard maximum latency
 	if (available > ceiling)
 	{
 		*cursor = write_frame - target;
@@ -572,7 +706,10 @@ extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size
 			std::uint64_t const produced = write_frame - s_audio.rate_last_write;
 			std::int64_t const measured = std::int64_t((produced << 16) / s_audio.rate_output);
 			// Ignore a reading that could only come from a stall or a wrap.
-			if (measured > 65536 * 4 / 5 && measured < 65536 * 5 / 4)
+			// Only believe a reading that is plausible for a running emulator.
+			// A wider window lets a stall be mistaken for the machine's true
+			// speed, and the feed-forward then chases a number that never was.
+			if (measured > 65536 * 95 / 100 && measured < 65536 * 105 / 100)
 				s_audio.rate_measured = measured;
 		}
 		s_audio.rate_last_write = write_frame;
@@ -629,7 +766,15 @@ extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size
 		// instead of dropping to zero -- a held level is far less audible than a
 		// square edge into silence -- and re-prime so the cushion is rebuilt
 		// rather than chased forever.
-		s_audio.underruns.fetch_add(1, std::memory_order_relaxed);
+		std::uint64_t const count = s_audio.underruns.fetch_add(1, std::memory_order_relaxed) + 1;
+		if (count <= 40 || (count % 50) == 0)
+		{
+			__android_log_print(ANDROID_LOG_WARN, kLogTag,
+				"TCVR_SOUND underrun #%llu available=%llu need=%llu target=%llu rateMeasured=%lld ratioPpm=%d",
+				(unsigned long long)count, (unsigned long long)available, (unsigned long long)needed,
+				(unsigned long long)target, (long long)((s_audio.rate_measured * 1000000) / 65536),
+				(int)s_audio.ratio_ppm.load(std::memory_order_relaxed));
+		}
 		std::size_t const copied = std::size_t(available < destination_frames ? available : destination_frames);
 		for (std::size_t frame = 0; frame < copied; ++frame)
 		{
@@ -646,7 +791,10 @@ extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size
 		for (std::size_t frame = copied; frame < destination_frames; ++frame)
 			for (int channel = 0; channel < channels; ++channel)
 				destination[frame * std::size_t(channels) + channel] = s_audio.last[channel < 2 ? channel : 1];
-		*cursor = write_frame;
+		// Advance by what was actually consumed, not to the writer. Jumping the
+		// cursor forward here would drop whatever the producer wrote in the
+		// meantime; the held samples covered the gap, they did not consume it.
+		*cursor += copied;
 		s_audio.phase = 0;
 		s_audio.primed = false;
 		return destination_frames;
