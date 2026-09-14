@@ -14,6 +14,8 @@
 
 #include <cstring>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <mutex>
 #include <vector>
 
@@ -35,9 +37,8 @@ tcvr_video_store s_video;
 
 struct tcvr_audio_store
 {
-	std::mutex mutex;
 	std::vector<std::int16_t> samples;
-	std::uint64_t write_frame = 0;
+	std::atomic<std::uint64_t> write_frame{ 0 };
 	int rate = 48000;
 	int channels = 2;
 
@@ -50,14 +51,16 @@ struct tcvr_audio_store
 	{
 		if (!source || frames <= 0)
 			return;
-		std::lock_guard lock(mutex);
+		// Single MAME producer, single AAudio callback consumer. Publishing the
+		// write cursor after filling samples keeps the realtime callback lock-free.
+		std::uint64_t const base = write_frame.load(std::memory_order_relaxed);
 		for (int frame = 0; frame < frames; ++frame)
 		{
-			std::size_t const slot = ((write_frame + std::uint64_t(frame)) % (samples.size() / channels)) * channels;
+			std::size_t const slot = ((base + std::uint64_t(frame)) % (samples.size() / channels)) * channels;
 			for (int channel = 0; channel < channels; ++channel)
 				samples[slot + channel] = source[frame * channels + channel];
 		}
-		write_frame += std::uint64_t(frames);
+		write_frame.store(base + std::uint64_t(frames), std::memory_order_release);
 	}
 };
 
@@ -89,21 +92,26 @@ public:
 			return;
 
 		bitmap_rgb32 &bitmap = screen->renderbitmap().as_rgb32();
+		rectangle const visible = screen->visible_area();
 		std::lock_guard lock(s_video.mutex);
-		s_video.width = bitmap.width();
-		s_video.height = bitmap.height();
-		s_video.stride = bitmap.rowpixels();
+		// renderbitmap includes System22 CRT overscan. Export MAME's declared
+		// visible area only, so the arcade image fills the XR presentation plane.
+		s_video.width = visible.width();
+		s_video.height = visible.height();
+		s_video.stride = s_video.width;
 		s_video.pixels.resize(std::size_t(s_video.stride) * std::size_t(s_video.height));
 		for (int y = 0; y < s_video.height; ++y)
 			std::memcpy(s_video.pixels.data() + std::size_t(y) * s_video.stride,
-				&bitmap.pix(y), std::size_t(s_video.stride) * sizeof(std::uint32_t));
+				&bitmap.pix(y + visible.min_y, visible.min_x), std::size_t(s_video.width) * sizeof(std::uint32_t));
 		if (s_video.sequence == 0)
 		{
 			std::size_t nonzero = 0;
 			for (std::uint32_t pixel : s_video.pixels)
 				nonzero += (pixel & 0x00ffffffU) != 0;
-			__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_M3 first framebuffer pixels=%zu/%zu first=0x%08x",
-				nonzero, s_video.pixels.size(), s_video.pixels.empty() ? 0U : s_video.pixels.front());
+			__android_log_print(ANDROID_LOG_INFO, kLogTag,
+				"TCVR_M3 first framebuffer pixels=%zu/%zu visible=%dx%d+%d+%d first=0x%08x",
+				nonzero, s_video.pixels.size(), visible.width(), visible.height(), visible.min_x, visible.min_y,
+				s_video.pixels.empty() ? 0U : s_video.pixels.front());
 		}
 		++s_video.sequence;
 	}
@@ -207,14 +215,18 @@ private:
 			ioport_list const &ports = m_machine->ioport().ports();
 			auto find_port = [&ports](char const *tag) -> ioport_port *
 			{
-				auto const it = ports.find(tag);
+				auto it = ports.find(tag);
+				if (it == ports.end() && tag[0] != ':')
+					it = ports.find(std::string(":") + tag);
 				return (it == ports.end()) ? nullptr : it->second.get();
 			};
 			auto set_button = [&find_port](char const *tag, ioport_value mask, bool pressed)
 			{
 				if (ioport_port *port = find_port(tag))
 					if (ioport_field *field = port->field(mask))
-						field->set_value(pressed ? 0 : field->defvalue());
+						// set_value is a programmatic pressed-state override. It is
+						// independent of the port's IP_ACTIVE_LOW electrical polarity.
+						field->set_value(pressed ? 1 : 0);
 			};
 			auto set_axis = [&find_port](char const *tag, float normalized)
 			{
@@ -231,15 +243,39 @@ private:
 			set_axis("OPT.0", gun_x);
 			set_axis("OPT.1", gun_y);
 			set_button("INPUTS", 0x0100, start);
+			if (!m_inputLogged || coin != m_lastCoin || start != m_lastStart || trigger != m_lastTrigger || pedal != m_lastPedal)
+			{
+				__android_log_print(ANDROID_LOG_INFO, kLogTag,
+					"TCVR_M6 MAME inputs coin=%d start=%d trigger=%d pedal=%d", coin, start, trigger, pedal);
+				m_inputLogged = true;
+				m_lastCoin = coin;
+				m_lastStart = start;
+				m_lastTrigger = trigger;
+				m_lastPedal = pedal;
+			}
 		}
 		++m_frame_count;
 		if (m_frame_count == 1)
 			__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_M2 first emulated video frame");
+		if ((m_frame_count % 300) == 0)
+		{
+			auto const now = std::chrono::steady_clock::now();
+			auto const elapsed = std::chrono::duration<float>(now - m_lastRateTime).count();
+			if (elapsed > 0.0f)
+				__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_PERF MAME fps=%.2f", 300.0f / elapsed);
+			m_lastRateTime = now;
+		}
 	}
 
 	int &m_frame_count;
 	running_machine *m_machine = nullptr;
 	std::unique_ptr<ui_manager> m_ui;
+	bool m_inputLogged = false;
+	bool m_lastCoin = false;
+	bool m_lastStart = false;
+	bool m_lastTrigger = false;
+	bool m_lastPedal = false;
+	std::chrono::steady_clock::time_point m_lastRateTime = std::chrono::steady_clock::now();
 };
 
 } // namespace
@@ -271,12 +307,13 @@ extern "C" int tcvr_mame_has_driver(const char *driver_id)
 	return driver_id && driver_list::find(driver_id) >= 0;
 }
 
-// Runs a bounded, headless boot of a driver selected by the generic C ABI.
-// The ROM archive remains at a caller-owned external path and is never copied
-// into the application or this repository.
+// Runs a headless driver selected by the generic C ABI. A positive `seconds`
+// is a test-only bound; zero is the normal continuous arcade runtime. The ROM
+// archive remains at a caller-owned external path and is never copied into the
+// application or this repository.
 extern "C" int tcvr_mame_boot_smoke(const char *driver_id, const char *rom_path, int seconds, int *frame_count)
 {
-	if (!driver_id || !rom_path || seconds <= 0 || !frame_count)
+	if (!driver_id || !rom_path || seconds < 0 || !frame_count)
 		return EMU_ERR_INVALID_CONFIG;
 
 	int const driver_index = driver_list::find(driver_id);
@@ -291,7 +328,8 @@ extern "C" int tcvr_mame_boot_smoke(const char *driver_id, const char *rom_path,
 		emu_options options(emu_options::option_support::GENERAL_AND_SYSTEM);
 		options.set_system_name(driver_id);
 		options.set_value(OPTION_MEDIAPATH, rom_path, OPTION_PRIORITY_MAXIMUM);
-		options.set_value(OPTION_SECONDS_TO_RUN, seconds, OPTION_PRIORITY_MAXIMUM);
+		if (seconds > 0)
+			options.set_value(OPTION_SECONDS_TO_RUN, seconds, OPTION_PRIORITY_MAXIMUM);
 		options.set_value(OPTION_SKIP_GAMEINFO, 1, OPTION_PRIORITY_MAXIMUM);
 		options.set_value(OPTION_READCONFIG, 0, OPTION_PRIORITY_MAXIMUM);
 		options.set_value(OPTION_WRITECONFIG, 0, OPTION_PRIORITY_MAXIMUM);
@@ -356,10 +394,9 @@ extern "C" int tcvr_mame_audio_info(int *rate, int *channels, std::uint64_t *wri
 {
 	if (!rate || !channels || !write_frame)
 		return 0;
-	std::lock_guard lock(s_audio.mutex);
 	*rate = s_audio.rate;
 	*channels = s_audio.channels;
-	*write_frame = s_audio.write_frame;
+	*write_frame = s_audio.write_frame.load(std::memory_order_acquire);
 	return 1;
 }
 
@@ -367,12 +404,12 @@ extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size
 {
 	if (!destination || !cursor || !destination_frames)
 		return 0;
-	std::lock_guard lock(s_audio.mutex);
 	std::size_t const capacity = s_audio.samples.size() / std::size_t(s_audio.channels);
-	std::uint64_t const oldest = (s_audio.write_frame > capacity) ? s_audio.write_frame - capacity : 0;
+	std::uint64_t const write_frame = s_audio.write_frame.load(std::memory_order_acquire);
+	std::uint64_t const oldest = (write_frame > capacity) ? write_frame - capacity : 0;
 	if (*cursor < oldest)
 		*cursor = oldest;
-	std::uint64_t const available = s_audio.write_frame - *cursor;
+	std::uint64_t const available = write_frame - *cursor;
 	std::size_t const frames = std::min<std::size_t>(destination_frames, std::size_t(available));
 	for (std::size_t frame = 0; frame < frames; ++frame)
 	{
