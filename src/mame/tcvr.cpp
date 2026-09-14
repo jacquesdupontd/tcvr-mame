@@ -31,6 +31,19 @@ struct tcvr_video_store
 	int height = 0;
 	int stride = 0;
 	std::uint64_t sequence = 0;
+
+	// Published without the mutex, for readers that only want to know whether
+	// anything changed. The XR renderer asks that question hundreds of times a
+	// second -- once per eye of every presented frame, which at 207 Hz is over
+	// 400 times a second -- while the emulator holds the mutex to copy a whole
+	// 640x480 frame into `pixels`. Making the cheap question take the expensive
+	// lock put the renderer squarely on the emulator's critical path: measured
+	// on a Quest 3, MAME sat at 70% CPU with the machine 267% idle, blocked on
+	// this lock, and ran at 58 fps instead of 60.
+	std::atomic<std::uint64_t> published_sequence{ 0 };
+	std::atomic<int> published_width{ 0 };
+	std::atomic<int> published_height{ 0 };
+	std::atomic<int> published_stride{ 0 };
 };
 
 tcvr_video_store s_video;
@@ -43,7 +56,17 @@ struct tcvr_audio_store
 	int channels = 2;
 	// Consumer-only state, touched exclusively by the AAudio callback.
 	bool primed = false;
+	std::uint32_t phase = 0;              // 0.16 fixed-point resampler phase
 	std::int16_t last[2] = { 0, 0 };
+	// Counters, so "the sound crackles" can be a number instead of an opinion.
+	// Written by the audio callback, read by anyone; relaxed is enough.
+	std::atomic<std::uint64_t> callbacks{ 0 };
+	std::atomic<std::uint64_t> underruns{ 0 };
+	std::atomic<std::uint64_t> stretches{ 0 };
+	std::atomic<std::uint64_t> shrinks{ 0 };
+	std::atomic<std::uint64_t> silent{ 0 };
+	std::atomic<std::uint32_t> cushion{ 0 };
+	std::atomic<std::int32_t> ratio_ppm{ 1000000 };
 
 	tcvr_audio_store()
 		: samples(std::size_t(48000) * 2 * std::size_t(2), 0)
@@ -117,6 +140,10 @@ public:
 				s_video.pixels.empty() ? 0U : s_video.pixels.front());
 		}
 		++s_video.sequence;
+		s_video.published_width.store(s_video.width, std::memory_order_relaxed);
+		s_video.published_height.store(s_video.height, std::memory_order_relaxed);
+		s_video.published_stride.store(s_video.stride, std::memory_order_relaxed);
+		s_video.published_sequence.store(s_video.sequence, std::memory_order_release);
 	}
 	void input_update(bool) override { }
 	void check_osd_inputs() override { }
@@ -375,12 +402,13 @@ extern "C" int tcvr_mame_latest_video_info(int *width, int *height, int *stride,
 {
 	if (!width || !height || !stride || !sequence)
 		return 0;
-	std::lock_guard lock(s_video.mutex);
-	*width = s_video.width;
-	*height = s_video.height;
-	*stride = s_video.stride;
-	*sequence = s_video.sequence;
-	return (!s_video.pixels.empty()) ? 1 : 0;
+	// Deliberately lock-free: see tcvr_video_store.
+	std::uint64_t const published = s_video.published_sequence.load(std::memory_order_acquire);
+	*width = s_video.published_width.load(std::memory_order_relaxed);
+	*height = s_video.published_height.load(std::memory_order_relaxed);
+	*stride = s_video.published_stride.load(std::memory_order_relaxed);
+	*sequence = published;
+	return published != 0 ? 1 : 0;
 }
 
 extern "C" std::size_t tcvr_mame_copy_latest_video(std::uint32_t *destination, std::size_t destination_pixels)
@@ -403,16 +431,39 @@ extern "C" int tcvr_mame_audio_info(int *rate, int *channels, std::uint64_t *wri
 	return 1;
 }
 
+// Raw counters, cumulative since start. No interpretation, no thresholds --
+// whoever reads them decides what "often" means.
+extern "C" void tcvr_mame_audio_stats(std::uint64_t *callbacks, std::uint64_t *underruns, std::uint64_t *stretches,
+	std::uint64_t *shrinks, std::uint64_t *silent, std::uint32_t *cushion_frames, std::int32_t *ratio_ppm)
+{
+	if (callbacks) *callbacks = s_audio.callbacks.load(std::memory_order_relaxed);
+	if (underruns) *underruns = s_audio.underruns.load(std::memory_order_relaxed);
+	if (stretches) *stretches = s_audio.stretches.load(std::memory_order_relaxed);
+	if (shrinks) *shrinks = s_audio.shrinks.load(std::memory_order_relaxed);
+	if (silent) *silent = s_audio.silent.load(std::memory_order_relaxed);
+	if (cushion_frames) *cushion_frames = s_audio.cushion.load(std::memory_order_relaxed);
+	if (ratio_ppm) *ratio_ppm = s_audio.ratio_ppm.load(std::memory_order_relaxed);
+}
+
 // The emulator clock and the audio device clock are independent, and always
 // will be: MAME advances on the original arcade timing while AAudio consumes at
-// exactly 48 kHz. They drift by a fraction of a percent, which is a few dozen
-// samples every second.
+// exactly 48 kHz. Worse, the emulator's speed is not even constant -- measured
+// on a Quest 3, MAME holds 59.90 fps on a quiet scene and drops towards 58 when
+// Area 1 gets busy, so the mismatch swings between roughly 0.2% and 3%.
 //
-// Draining the ring to empty on every callback turned that drift straight into
-// gaps of silence -- several per second, heard as crackling. The reader now
-// keeps a deliberate cushion and absorbs the drift by consuming one frame more
-// or less than it emits, which is a 0.5% pitch change on a single 4 ms buffer
-// and is inaudible. It never returns a partially filled buffer.
+// Two earlier shapes of this reader both failed, and for the same reason:
+// they could only ever consume a whole number of frames. Draining the ring to
+// empty turned every shortfall into a gap of silence. Trimming by one frame in
+// 192 capped the correction at 0.52%, which cannot track a 3% deficit, so the
+// cushion drained anyway and underran about once every ten seconds.
+//
+// This reader resamples instead. It keeps a target cushion, derives a playback
+// ratio from how far the cushion has wandered, and reads the ring at that ratio
+// with linear interpolation and a fixed-point phase carried across callbacks.
+// A ratio within a couple of percent of unity is a pitch shift of a few tens of
+// a semitone, held steady rather than jumping -- inaudible, and it never leaves
+// a hole. The ratio is clamped so that a genuinely stalled emulator degrades
+// into an honest underrun rather than into a slowed-down drone.
 extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size_t destination_frames, std::uint64_t *cursor)
 {
 	if (!destination || !cursor || !destination_frames)
@@ -425,68 +476,98 @@ extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size
 	// ride out a slow frame, short enough not to be felt as lag.
 	std::uint64_t const target = std::uint64_t(s_audio.rate) * 80u / 1000u;
 
+	s_audio.callbacks.fetch_add(1, std::memory_order_relaxed);
+
 	if (!s_audio.primed)
 	{
 		if (write_frame < target)
+		{
+			s_audio.silent.fetch_add(1, std::memory_order_relaxed);
 			return 0;  // still filling; silence is correct here, and brief
+		}
 		*cursor = write_frame - target;
+		s_audio.phase = 0;
 		s_audio.primed = true;
 	}
 
 	// Never read samples the producer has already overwritten.
 	std::uint64_t const oldest = (write_frame > capacity) ? write_frame - capacity : 0;
 	if (*cursor < oldest)
+	{
 		*cursor = oldest;
+		s_audio.phase = 0;
+	}
 
 	std::uint64_t const available = (write_frame > *cursor) ? write_frame - *cursor : 0;
+	s_audio.cushion.store(std::uint32_t(available > 0xffffffffu ? 0xffffffffu : available), std::memory_order_relaxed);
 
-	if (available < destination_frames)
+	// Playback ratio in 16.16 fixed point: input frames consumed per output
+	// frame. Unity plus a correction proportional to the cushion error, aiming to
+	// absorb that error over about half a second, and clamped to +/-3%.
+	std::int64_t const error = std::int64_t(available) - std::int64_t(target);
+	std::int64_t const span = std::int64_t(s_audio.rate) / 2;
+	std::int64_t ratio = 65536 + (span > 0 ? (error * 65536) / span : 0);
+	std::int64_t const lowest = 65536 * 97 / 100;
+	std::int64_t const highest = 65536 * 103 / 100;
+	if (ratio < lowest) ratio = lowest;
+	if (ratio > highest) ratio = highest;
+	s_audio.ratio_ppm.store(std::int32_t((ratio * 1000000) / 65536), std::memory_order_relaxed);
+	if (ratio < 65536) s_audio.stretches.fetch_add(1, std::memory_order_relaxed);
+	else if (ratio > 65536) s_audio.shrinks.fetch_add(1, std::memory_order_relaxed);
+
+	// Frames the ring must hold for this buffer, plus one for the interpolation
+	// to have something to reach towards.
+	std::uint64_t const needed = std::uint64_t((ratio * std::int64_t(destination_frames)) >> 16) + 2u;
+
+	if (available < needed)
 	{
-		// A real underrun. Hold the last sample instead of dropping to zero --
-		// a held level is far less audible than a square edge into silence --
-		// and re-prime so the cushion is rebuilt rather than chased forever.
-		for (std::size_t frame = 0; frame < available; ++frame)
+		// A genuine underrun. Emit what the ring holds, then hold the last sample
+		// instead of dropping to zero -- a held level is far less audible than a
+		// square edge into silence -- and re-prime so the cushion is rebuilt
+		// rather than chased forever.
+		s_audio.underruns.fetch_add(1, std::memory_order_relaxed);
+		std::size_t const copied = std::size_t(available < destination_frames ? available : destination_frames);
+		for (std::size_t frame = 0; frame < copied; ++frame)
 		{
 			std::size_t const slot = ((*cursor + frame) % capacity) * std::size_t(channels);
 			std::memcpy(destination + frame * std::size_t(channels), s_audio.samples.data() + slot,
 				std::size_t(channels) * sizeof(std::int16_t));
 		}
-		if (available)
+		if (copied)
 		{
-			std::size_t const slot = ((*cursor + available - 1) % capacity) * std::size_t(channels);
+			std::size_t const slot = ((*cursor + copied - 1) % capacity) * std::size_t(channels);
 			for (int channel = 0; channel < channels && channel < 2; ++channel)
 				s_audio.last[channel] = s_audio.samples[slot + channel];
 		}
-		for (std::size_t frame = available; frame < destination_frames; ++frame)
+		for (std::size_t frame = copied; frame < destination_frames; ++frame)
 			for (int channel = 0; channel < channels; ++channel)
 				destination[frame * std::size_t(channels) + channel] = s_audio.last[channel < 2 ? channel : 1];
 		*cursor = write_frame;
+		s_audio.phase = 0;
 		s_audio.primed = false;
 		return destination_frames;
 	}
 
-	// Trim the drift by at most one frame per callback, and only when the
-	// cushion has actually wandered out of band.
-	std::size_t consume = destination_frames;
-	if (available < target / 2 && consume > 1)
-		--consume;                       // running dry: stretch very slightly
-	else if (available > target * 2)
-		++consume;                       // piling up: shrink very slightly
-	if (std::uint64_t(consume) > available)
-		consume = std::size_t(available);
-
+	std::uint64_t position = (*cursor << 16) | std::uint64_t(s_audio.phase);
 	for (std::size_t frame = 0; frame < destination_frames; ++frame)
 	{
-		std::size_t const source = (frame * consume) / destination_frames;
-		std::size_t const slot = ((*cursor + source) % capacity) * std::size_t(channels);
-		std::memcpy(destination + frame * std::size_t(channels), s_audio.samples.data() + slot,
-			std::size_t(channels) * sizeof(std::int16_t));
+		std::uint64_t const index = position >> 16;
+		std::int32_t const weight = std::int32_t(position & 0xffffu);
+		std::size_t const slot = std::size_t(index % capacity) * std::size_t(channels);
+		std::size_t const next = std::size_t((index + 1) % capacity) * std::size_t(channels);
+		for (int channel = 0; channel < channels; ++channel)
+		{
+			std::int32_t const a = s_audio.samples[slot + channel];
+			std::int32_t const b = s_audio.samples[next + channel];
+			destination[frame * std::size_t(channels) + channel] = std::int16_t(a + (((b - a) * weight) >> 16));
+		}
+		position += std::uint64_t(ratio);
 	}
-	std::size_t const lastSlot = ((*cursor + consume - 1) % capacity) * std::size_t(channels);
 	for (int channel = 0; channel < channels && channel < 2; ++channel)
-		s_audio.last[channel] = s_audio.samples[lastSlot + channel];
+		s_audio.last[channel] = destination[(destination_frames - 1) * std::size_t(channels) + channel];
 
-	*cursor += consume;
+	*cursor = position >> 16;
+	s_audio.phase = std::uint32_t(position & 0xffffu);
 	return destination_frames;
 }
 
