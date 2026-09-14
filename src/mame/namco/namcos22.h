@@ -94,6 +94,7 @@ struct namcos22_scenenode
 			int cz_adjust;
 			int objectflags;
 			bool direct;
+			float zoom;              // TCVR: camera zoom applied to v[].x/y
 			namcos22_polyvertex v[4];
 		} quad;
 
@@ -277,6 +278,16 @@ public:
 	int m_fog_g;
 	int m_fog_b;
 	std::unique_ptr<u8[]> m_recalc_czram[4];
+public:
+	// TCVR scene recorder needs these read-only from the driver.
+	const u8 *tcvr_czram_bank(int b) const { return m_recalc_czram[b & 3].get(); }
+	void tcvr_scene_publish(screen_device &screen, int spot_enabled, int spot_factor, int spot_palbase, const u16 *spotram);
+	const u16 *tcvr_texture_tilemap() const { return m_texture_tilemap; }
+	const u8 *tcvr_texture_tileattr() const { return m_texture_tileattr.get(); }
+	const u8 *tcvr_texture_ayx() const { return m_texture_ayx_to_pixel.get(); }
+	gfx_element *tcvr_gfx(int index) { return m_gfxdecode->gfx(index); }
+	u32 tcvr_pen_count() const { return m_palette->entries(); }
+public:
 	int m_fog_r_per_cztype[4];
 	int m_fog_g_per_cztype[4];
 	int m_fog_b_per_cztype[4];

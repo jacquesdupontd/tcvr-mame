@@ -26,6 +26,7 @@
 namespace {
 
 constexpr char kLogTag[] = "TCVR_MAME";
+std::atomic<running_machine *> s_tcvr_machine{ nullptr };
 
 // __system_property_get writes an EMPTY string and returns 0 when the property
 // does not exist, so passing a pre-filled buffer as a "default" silently loses
@@ -412,6 +413,7 @@ public:
 		}
 		machine.add_notifier(MACHINE_NOTIFY_FRAME, machine_notify_delegate(&tcvr_machine_manager::on_frame, this));
 		m_machine = &machine;
+		s_tcvr_machine.store(&machine, std::memory_order_release);
 	}
 
 private:
@@ -1037,4 +1039,135 @@ extern "C" void tcvr_mame_set_analog(char const *id, float value)
 		s_input.gun_x = value;
 	else if (!std::strcmp(id, "gun_y"))
 		s_input.gun_y = value;
+}
+
+// ---------------------------------------------------------------------------
+// TCVR scene recorder (see tcvr_scene.h). Triple-buffered like the video.
+// ---------------------------------------------------------------------------
+#include "tcvr_scene.h"
+#include "namco/namcos22.h"
+namespace {
+struct tcvr_scene_store
+{
+	struct slot
+	{
+		std::vector<tcvr_scene_vertex> vertices;
+		std::vector<tcvr_scene_prim> prims;
+		std::vector<uint32_t> pens;
+		std::vector<uint8_t> czram;
+		std::vector<uint16_t> text;
+		std::vector<uint8_t> gamma;   // 3 x 256
+		std::vector<uint8_t> pri;     // text mask, width x height
+		std::vector<uint16_t> spotram;
+		tcvr_scene_frame frame{};
+	};
+	std::mutex mutex;
+	slot slots[3];
+	int write_idx = 0, published_idx = 1, read_idx = 2;
+	bool fresh = false;
+	uint64_t sequence = 0;
+	bool recording = false;
+	std::atomic<int> enabled{0};
+	// static assets, built once
+	std::vector<uint8_t> sprite_atlas;
+	bool assets_ready = false;
+	tcvr_scene_assets assets{};
+};
+tcvr_scene_store s_scene;
+}
+
+extern "C" void tcvr_mame_scene_enable(int enabled) { s_scene.enabled.store(enabled ? 1 : 0, std::memory_order_relaxed); }
+extern "C" int tcvr_scene_mode(void) { return s_scene.enabled.load(std::memory_order_relaxed); }
+extern "C" void tcvr_scene_begin(void)
+{
+	if (!s_scene.enabled.load(std::memory_order_relaxed)) { s_scene.recording = false; return; }
+	auto &w = s_scene.slots[s_scene.write_idx];
+	w.vertices.clear(); w.prims.clear();
+	s_scene.recording = true;
+}
+extern "C" void tcvr_scene_poly(const tcvr_scene_vertex *v, int count, const tcvr_scene_prim &p)
+{
+	if (!s_scene.recording) return;
+	auto &w = s_scene.slots[s_scene.write_idx];
+	tcvr_scene_prim q = p; q.first_vertex = uint32_t(w.vertices.size()); q.vertex_count = uint32_t(count);
+	w.vertices.insert(w.vertices.end(), v, v + count);
+	w.prims.push_back(q);
+}
+extern "C" void tcvr_scene_sprite(const tcvr_scene_vertex *v, const tcvr_scene_prim &p)
+{
+	tcvr_scene_poly(v, 4, p);
+}
+extern "C" void tcvr_scene_end(const tcvr_scene_frame &fp)
+{
+	if (!s_scene.recording) return;
+	s_scene.recording = false;
+	auto &w = s_scene.slots[s_scene.write_idx];
+	w.pens.assign(fp.pens, fp.pens + fp.pen_count);
+	w.czram.assign(fp.czram, fp.czram + fp.cz_banks * fp.cz_entries);
+	if (fp.text) { w.text.resize(size_t(fp.width) * fp.height); for (int y = 0; y < fp.height; y++) std::memcpy(w.text.data() + size_t(y) * fp.width, fp.text + size_t(y) * fp.text_stride, size_t(fp.width) * 2); }
+	// The gamma tables live in the mixer's u32 words and are read with nthbyte(): byte i is at i ^ 3.
+	w.gamma.resize(768); for (int i = 0; i < 256; i++) { w.gamma[i] = fp.gamma_r[i ^ 3]; w.gamma[256 + i] = fp.gamma_g[i ^ 3]; w.gamma[512 + i] = fp.gamma_b[i ^ 3]; }
+	if (fp.pri) { w.pri.resize(size_t(fp.width) * fp.height); for (int y = 0; y < fp.height; y++) std::memcpy(w.pri.data() + size_t(y) * fp.width, fp.pri + size_t(y) * fp.pri_stride, size_t(fp.width)); }
+	if (fp.spotram) w.spotram.assign(fp.spotram, fp.spotram + 0x400); else w.spotram.clear();
+	w.frame = fp;
+	w.frame.vertices = w.vertices.data(); w.frame.vertex_count = uint32_t(w.vertices.size());
+	w.frame.prims = w.prims.data(); w.frame.prim_count = uint32_t(w.prims.size());
+	w.frame.pens = w.pens.data(); w.frame.czram = w.czram.data();
+	w.frame.text = w.text.empty() ? nullptr : w.text.data(); w.frame.text_stride = uint32_t(fp.width);
+	w.frame.gamma_r = w.gamma.data(); w.frame.gamma_g = w.gamma.data() + 256; w.frame.gamma_b = w.gamma.data() + 512;
+	w.frame.pri = w.pri.empty() ? nullptr : w.pri.data(); w.frame.pri_stride = uint32_t(fp.width);
+	w.frame.spotram = w.spotram.empty() ? nullptr : w.spotram.data();
+	std::lock_guard lock(s_scene.mutex);
+	w.frame.sequence = ++s_scene.sequence;
+	std::swap(s_scene.write_idx, s_scene.published_idx);
+	s_scene.fresh = true;
+}
+extern "C" const tcvr_scene_frame *tcvr_mame_acquire_scene(void)
+{
+	std::lock_guard lock(s_scene.mutex);
+	if (s_scene.fresh) { std::swap(s_scene.read_idx, s_scene.published_idx); s_scene.fresh = false; }
+	auto &r = s_scene.slots[s_scene.read_idx];
+	return r.frame.sequence ? &r.frame : nullptr;
+}
+extern "C" int tcvr_mame_scene_assets(tcvr_scene_assets *out)
+{
+	if (!out) return 0;
+	running_machine *mp = s_tcvr_machine.load(std::memory_order_acquire);
+	if (!mp) return 0;
+	running_machine &machine = *mp;
+	if (!s_scene.assets_ready)
+	{
+		namcos22_state *state = dynamic_cast<namcos22_state *>(&machine.root_device());
+		if (!state) return 0;
+		memory_region *const textile = machine.root_device().memregion("textile");
+		gfx_element *const gfx = state->tcvr_gfx(2);
+		// create_custom publishes the machine before video_start has built these
+		// tables. Do not permanently cache that transient, half-initialised view.
+		// The first recorded scene is published only after video_start, so a later
+		// call will see the complete immutable asset set.
+		if (!textile || !state->tcvr_texture_tilemap() || !state->tcvr_texture_tileattr() ||
+			!state->tcvr_texture_ayx() || !gfx || !gfx->elements())
+			return 0;
+		auto &a = s_scene.assets;
+		a.tiledata = textile->base(); a.tiledata_bytes = uint32_t(textile->bytes());
+		a.tilemap = state->tcvr_texture_tilemap(); a.tilemap_entries = 0x100000;
+		a.tileattr = state->tcvr_texture_tileattr(); a.tileattr_entries = 0x100000;
+		a.ayx = state->tcvr_texture_ayx(); a.ayx_entries = 16 * 16 * 16;
+		if (gfx)
+		{
+			a.sprite_width = gfx->width(); a.sprite_height = gfx->height(); a.sprite_count = gfx->elements();
+			s_scene.sprite_atlas.resize(size_t(a.sprite_count) * a.sprite_width * a.sprite_height);
+			for (uint32_t e = 0; e < a.sprite_count; e++)
+			{
+				const u8 *src = gfx->get_data(e);
+				for (uint32_t y = 0; y < a.sprite_height; y++)
+					std::memcpy(s_scene.sprite_atlas.data() + (size_t(e) * a.sprite_height + y) * a.sprite_width, src + y * gfx->rowbytes(), a.sprite_width);
+			}
+			a.sprites = s_scene.sprite_atlas.data();
+		}
+		a.pen_count = state->tcvr_pen_count();
+		s_scene.assets_ready = true;
+	}
+	*out = s_scene.assets;
+	return 1;
 }

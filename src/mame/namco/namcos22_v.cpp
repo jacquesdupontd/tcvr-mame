@@ -7,6 +7,7 @@
 */
 
 #include "emu.h"
+#include "../tcvr_scene.h"
 #if defined(__ANDROID__)
 #include <android/log.h>
 #include <chrono>
@@ -316,6 +317,8 @@ void namcos22_renderer::poly3d_drawquad(screen_device &screen, bitmap_rgb32 &bit
 	int clipverts;
 	int vertnum;
 	const bool direct = node->data.quad.direct;
+	vertex_t tcvr_pre[6];
+	int tcvr_pre_n = 0;
 
 	// scene clip
 	const int cx = 320 + node->data.quad.vx;
@@ -340,6 +343,8 @@ void namcos22_renderer::poly3d_drawquad(screen_device &screen, bitmap_rgb32 &bit
 		assert(clipverts <= std::size(clipv));
 		if (clipverts < 3)
 			return;
+		for (int i = 0; i < clipverts; i++) tcvr_pre[i] = clipv[i];   // TCVR: eye space, before the divide
+		tcvr_pre_n = clipverts;
 
 		for (vertnum = 0; vertnum < clipverts; vertnum++)
 		{
@@ -357,6 +362,13 @@ void namcos22_renderer::poly3d_drawquad(screen_device &screen, bitmap_rgb32 &bit
 	else
 	{
 		clipverts = 4;
+		for (int i = 0; i < 4; i++)
+		{
+			tcvr_pre[i].x = node->data.quad.v[i].x; tcvr_pre[i].y = node->data.quad.v[i].y;
+			tcvr_pre[i].p[0] = node->data.quad.v[i].z; tcvr_pre[i].p[1] = node->data.quad.v[i].u;
+			tcvr_pre[i].p[2] = node->data.quad.v[i].v; tcvr_pre[i].p[3] = node->data.quad.v[i].bri;
+		}
+		tcvr_pre_n = 4;
 		for (vertnum = 0; vertnum < 4; vertnum++)
 		{
 			const poly3d_t ooz = node->data.quad.v[vertnum].z;
@@ -477,6 +489,35 @@ void namcos22_renderer::poly3d_drawquad(screen_device &screen, bitmap_rgb32 &bit
 		extra.fogfactor = 0;
 	}
 
+	{
+		// TCVR: record this polygon for the GPU path, with everything the
+		// per-pixel path uses. Same walk, same order, no extra emulation.
+		tcvr_scene_vertex sv[6];
+		for (int i = 0; i < tcvr_pre_n; i++)
+			sv[i] = { float(tcvr_pre[i].x), float(tcvr_pre[i].y), float(tcvr_pre[i].p[0]), float(tcvr_pre[i].p[1]), float(tcvr_pre[i].p[2]), float(tcvr_pre[i].p[3]) };
+		tcvr_scene_prim sp{};
+		sp.kind = 0; sp.direct = direct ? 1 : 0; sp.zoom = node->data.quad.zoom;
+		sp.cx = cx; sp.cy = cy;
+		sp.clip_l = m_cliprect.left(); sp.clip_t = m_cliprect.top(); sp.clip_r = m_cliprect.right(); sp.clip_b = m_cliprect.bottom();
+		const pen_t *base = &m_state.m_palette->pen(0);
+		int penmask = 0xff, penshift = 0; const pen_t *pens = extra.pens;
+		if (extra.cmode & 4) { pens += 0xec + ((extra.cmode & 8) << 1); penmask = 0x03; penshift = 2 * (~extra.cmode & 3); }
+		else if (extra.cmode & 2) { pens += 0xe0 + ((extra.cmode & 8) << 1); penmask = 0x0f; penshift = 4 * (~extra.cmode & 1); }
+		sp.pens_offset = uint32_t(pens - base); sp.penmask = penmask; sp.penshift = penshift;
+		sp.bn = extra.bn * 0x1000;
+		sp.texture_enabled = extra.texture_enabled; sp.shade_enabled = extra.shade_enabled; sp.prioverchar = extra.prioverchar;
+		sp.fog_mode = extra.zfog_enabled ? 2 : (extra.fogfactor != 0 ? 1 : 0);
+		sp.fogfactor = extra.fogfactor; sp.cz_sdelta = extra.cz_sdelta;
+		sp.cz_bank = 0;
+		for (int b = 0; b < 4; b++) if (extra.czram == m_state.tcvr_czram_bank(b)) sp.cz_bank = b;
+		sp.fog_r = extra.fogcolor.get_r(); sp.fog_g = extra.fogcolor.get_g(); sp.fog_b = extra.fogcolor.get_b();
+		sp.fade_enabled = extra.fadefactor != 0; sp.fadefactor = extra.fadefactor;
+		sp.fade_r = extra.fadecolor.get_r(); sp.fade_g = extra.fadecolor.get_g(); sp.fade_b = extra.fadecolor.get_b();
+		sp.pfade_enabled = extra.pfade_enabled; sp.poly_r = extra.polycolor.get_r(); sp.poly_g = extra.polycolor.get_g(); sp.poly_b = extra.polycolor.get_b();
+		sp.alpha_enabled = extra.alpha_enabled; sp.alpha = extra.alpha; sp.alpha_pen = m_state.m_poly_alpha_pen;
+		tcvr_scene_poly(sv, tcvr_pre_n, sp);
+	}
+	if (tcvr_scene_mode() >= 2) return;   // TCVR: the GPU draws it
 	if (m_state.m_is_ss22)
 		dispatch_scanline_poly(&namcos22_renderer::renderscanline_poly_ss22, clipverts, clipv);
 	else
@@ -559,6 +600,23 @@ void namcos22_renderer::poly3d_drawsprite(
 		extra.alpha = alpha;
 		extra.alpha_enabled = (color & 0x7f) != m_state.m_poly_alpha_color;
 
+		{
+			tcvr_scene_vertex sv[4];
+			for (int i = 0; i < 4; i++) sv[i] = { float(vert[i].x), float(vert[i].y), 1.0f, float(vert[i].p[0]), float(vert[i].p[1]), 255.0f };
+			tcvr_scene_prim sp{};
+			sp.kind = 1; sp.direct = 1; sp.zoom = 1.0f; sp.cx = 0; sp.cy = 0;
+			sp.clip_l = m_cliprect.left(); sp.clip_t = m_cliprect.top(); sp.clip_r = m_cliprect.right(); sp.clip_b = m_cliprect.bottom();
+			sp.pens_offset = uint32_t(extra.pens - &m_state.m_palette->pen(0)); sp.penmask = 0xff; sp.penshift = 0;
+			sp.texture_enabled = 1; sp.shade_enabled = 0; sp.prioverchar = extra.prioverchar;
+			sp.fog_mode = extra.fogfactor != 0 ? 1 : 0; sp.fogfactor = extra.fogfactor;
+			sp.fog_r = extra.fogcolor.get_r(); sp.fog_g = extra.fogcolor.get_g(); sp.fog_b = extra.fogcolor.get_b();
+			sp.fade_enabled = extra.fadefactor != 0; sp.fadefactor = extra.fadefactor;
+			sp.fade_r = extra.fadecolor.get_r(); sp.fade_g = extra.fadecolor.get_g(); sp.fade_b = extra.fadecolor.get_b();
+			sp.alpha_enabled = extra.alpha_enabled; sp.alpha = extra.alpha; sp.alpha_pen = m_state.m_poly_alpha_pen;
+			sp.sprite_code = code % gfx->elements(); sp.flipx = flipx; sp.flipy = flipy;
+			tcvr_scene_sprite(sv, sp);
+		}
+		if (tcvr_scene_mode() >= 2) return;   // TCVR: the GPU draws it
 		render_polygon<4, 2>(m_cliprect, render_delegate(&namcos22_renderer::renderscanline_sprite, this), vert);
 	}
 }
@@ -705,6 +763,7 @@ void namcos22_renderer::render_scene_nodes(screen_device &screen, bitmap_rgb32 &
 
 void namcos22_renderer::render_scene(screen_device &screen, bitmap_rgb32 &bitmap)
 {
+	tcvr_scene_begin();
 	struct namcos22_scenenode *node = &m_scenenode_root;
 	for (int i = NAMCOS22_RADIX_BUCKETS - 1; i >= 0; i--)
 	{
@@ -1148,6 +1207,7 @@ void namcos22_state::blit_single_quad(u32 color, u32 addr, float m[4][4], int po
 	}
 
 	node->data.quad.direct = false;
+	node->data.quad.zoom = m_camera_zoom;
 	node->data.quad.vx = m_camera_vx;
 	node->data.quad.vy = m_camera_vy;
 	node->data.quad.vu = m_camera_vu;
@@ -2650,6 +2710,9 @@ u32 namcos22s_state::screen_update_namcos22s(screen_device &screen, bitmap_rgb32
 		}
 		m_tcvr_pri[m_tcvr_pri_cur].fill(0, cliprect);
 		m_poly->m_primap = &m_tcvr_pri[m_tcvr_pri_cur];
+		// The text tilemap still marks its opaque pixels in screen.priority(): clear it too,
+		// or the marks of every previous frame stay and the text mix draws stale characters.
+		screen.priority().fill(0, cliprect);
 	}
 	else
 	{
@@ -2669,6 +2732,14 @@ u32 namcos22s_state::screen_update_namcos22s(screen_device &screen, bitmap_rgb32
 	// layers
 	const u8 layer = nthbyte(m_mixer, 0x1f);
 	if (BIT(layer, 2)) draw_text_layer(screen, bitmap, cliprect);
+	if (m_tcvr_async)
+	{
+		// The workers write into m_tcvr_pri[cur]; carry the text marks over from
+		// screen.priority(), or the final mix never finds a pixel at priority 6.
+		bitmap_ind8 &dst = m_tcvr_pri[m_tcvr_pri_cur];
+		for (int y = cliprect.top(); y <= cliprect.bottom(); y++)
+			std::memcpy(&dst.pix(y, cliprect.left()), &screen.priority().pix(y, cliprect.left()), cliprect.width());
+	}
 #if defined(__ANDROID__)
 	auto const t2 = clk::now();
 #endif
@@ -2680,6 +2751,9 @@ u32 namcos22s_state::screen_update_namcos22s(screen_device &screen, bitmap_rgb32
 	m_poly->m_skip_wait = m_tcvr_async;
 	m_poly->render_scene(screen, bitmap);
 	m_poly->m_skip_wait = false;
+	// Same instant as the CPU dispatch, before the deferred wait: the recorded
+	// primitives are this frame's, and no emulation tick was added.
+	tcvr_scene_publish(screen, BIT(m_spotram_enable, 0) && (m_chipselect & 0xc000), (m_spot_factor < 0x100) ? 0 : m_spot_factor & 0xff, m_text_palbase >> 8 & 3, m_spotram.get());
 #if defined(__ANDROID__)
 	auto const t4 = clk::now();
 #endif
@@ -2905,4 +2979,32 @@ void namcos22_state::video_start()
 	m_gfxdecode->gfx(0)->set_source((u8 *)m_cgram.target());
 
 	m_poly = std::make_unique<namcos22_renderer>(*this);
+}
+
+
+// TCVR: hand the recorder everything a frame needs besides its primitives.
+void namcos22_state::tcvr_scene_publish(screen_device &screen, int spot_enabled, int spot_factor, int spot_palbase, const u16 *spotram)
+{
+	tcvr_scene_frame f{};
+	f.pri = &screen.priority().pix(0); f.pri_stride = screen.priority().rowpixels();
+	f.mix_spot_factor = spot_factor; f.mix_spot_palbase = spot_palbase; f.spotram = spotram;
+	f.width = 640; f.height = 480;
+	f.pens = reinterpret_cast<const uint32_t *>(m_palette->pens()); f.pen_count = m_palette->entries();
+	static std::vector<uint8_t> cz; cz.resize(4 * 0x2000);
+	for (int b = 0; b < 4; b++) if (m_recalc_czram[b]) std::memcpy(cz.data() + b * 0x2000, m_recalc_czram[b].get(), 0x2000);
+	f.czram = cz.data(); f.cz_banks = 4; f.cz_entries = 0x2000;
+	f.text = m_mix_bitmap ? &m_mix_bitmap->pix(0) : nullptr; f.text_stride = m_mix_bitmap ? m_mix_bitmap->rowpixels() : 0;
+	f.text_palbase = m_text_palbase;
+	f.mix_alpha_check12 = nthbyte(m_mixer, 0x12); f.mix_alpha_check13 = nthbyte(m_mixer, 0x13);
+	f.mix_alpha_mask = nthbyte(m_mixer, 0x14) & 0xf; f.mix_alpha_factor = nthbyte(m_mixer, 0x15);
+	f.mix_fade_enabled = BIT(m_mixer_flags, 1) && m_screen_fade_factor; f.mix_fade_factor = 0xff - m_screen_fade_factor;
+	f.mix_fade_r = m_screen_fade_r; f.mix_fade_g = m_screen_fade_g; f.mix_fade_b = m_screen_fade_b;
+	f.mix_spot_enabled = spot_enabled ? 1 : 0;
+	f.gamma_r = (const u8 *)&m_mixer[0x100/4]; f.gamma_g = (const u8 *)&m_mixer[0x200/4]; f.gamma_b = (const u8 *)&m_mixer[0x300/4];
+	{
+		rgbaint_t bg(0, nthbyte(m_mixer, 0x08), nthbyte(m_mixer, 0x09), nthbyte(m_mixer, 0x0a));
+		if (BIT(m_mixer_flags, 0) && m_screen_fade_factor) { rgbaint_t fc(0, m_screen_fade_r, m_screen_fade_g, m_screen_fade_b); bg.blend(fc, 0xff - m_screen_fade_factor); }
+		f.bg_color = bg.to_rgba();
+	}
+	tcvr_scene_end(f);
 }
