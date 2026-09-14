@@ -416,11 +416,22 @@ public:
 
 private:
 	render_target *m_render_target = nullptr;
+	bool m_paused_by_property = false;
 
 	void on_frame()
 	{
 		if (m_machine)
 		{
+			// Freeze the emulation on request, so the same frame can be looked at
+			// under every display filter. A debug tool, read once a frame.
+			const bool wantPause = property_flag("debug.tcvr.pause", false);
+			if (wantPause != m_paused_by_property)
+			{
+				if (wantPause) m_machine->pause(); else m_machine->resume();
+				m_paused_by_property = wantPause;
+				__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_SOUND emulation %s by debug.tcvr.pause",
+					wantPause ? "PAUSED" : "resumed");
+			}
 			bool coin, start, trigger, pedal;
 			float gun_x, gun_y;
 			{
