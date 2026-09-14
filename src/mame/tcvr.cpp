@@ -8,6 +8,7 @@
 #include "osdepend.h"
 #include "rendlay.h"
 #include "render.h"
+#include "video.h"
 
 #include "ui/uimain.h"
 
@@ -49,7 +50,18 @@ inline int property_int(const char *name, int fallback)
 struct tcvr_video_store
 {
 	std::mutex mutex;
-	std::vector<std::uint32_t> pixels;
+	// Triple buffer. The emulation thread fills `buffers[write_idx]` with NO lock
+	// held, then swaps it into `published_idx` under the lock for a few
+	// nanoseconds. The reader swaps `published_idx` into `read_idx` the same way
+	// and uploads straight from it. The three indices are always distinct, so
+	// nobody ever waits for a 1.2 MB copy -- which is what produced the 1.27 ms
+	// spikes on the one thread whose speed is the whole problem.
+	std::vector<std::uint32_t> buffers[3];
+	std::uint64_t buffer_seq[3] = { 0, 0, 0 };
+	int write_idx = 0;
+	int published_idx = 1;
+	int read_idx = 2;
+	bool published_fresh = false;
 	int width = 0;
 	int height = 0;
 	int stride = 0;
@@ -164,30 +176,38 @@ public:
 		// copies 1.2 MB under a mutex sixty times a second, on the one thread
 		// whose speed is the whole problem. That has never been measured.
 		auto const captureStart = std::chrono::steady_clock::now();
-		std::lock_guard lock(s_video.mutex);
 		// renderbitmap includes System22 CRT overscan. Export MAME's declared
 		// visible area only, so the arcade image fills the XR presentation plane.
-		s_video.width = visible.width();
-		s_video.height = visible.height();
-		s_video.stride = s_video.width;
-		s_video.pixels.resize(std::size_t(s_video.stride) * std::size_t(s_video.height));
-		for (int y = 0; y < s_video.height; ++y)
-			std::memcpy(s_video.pixels.data() + std::size_t(y) * s_video.stride,
-				&bitmap.pix(y + visible.min_y, visible.min_x), std::size_t(s_video.width) * sizeof(std::uint32_t));
+		int const width = visible.width();
+		int const height = visible.height();
+		std::vector<std::uint32_t> &target = s_video.buffers[s_video.write_idx];
+		target.resize(std::size_t(width) * std::size_t(height));
+		for (int y = 0; y < height; ++y)
+			std::memcpy(target.data() + std::size_t(y) * width,
+				&bitmap.pix(y + visible.min_y, visible.min_x), std::size_t(width) * sizeof(std::uint32_t));
 		if (s_video.sequence == 0)
 		{
 			std::size_t nonzero = 0;
-			for (std::uint32_t pixel : s_video.pixels)
+			for (std::uint32_t pixel : target)
 				nonzero += (pixel & 0x00ffffffU) != 0;
 			__android_log_print(ANDROID_LOG_INFO, kLogTag,
 				"TCVR_M3 first framebuffer pixels=%zu/%zu visible=%dx%d+%d+%d first=0x%08x",
-				nonzero, s_video.pixels.size(), visible.width(), visible.height(), visible.min_x, visible.min_y,
-				s_video.pixels.empty() ? 0U : s_video.pixels.front());
+				nonzero, target.size(), width, height, visible.min_x, visible.min_y,
+				target.empty() ? 0U : target.front());
 		}
-		++s_video.sequence;
-		s_video.published_width.store(s_video.width, std::memory_order_relaxed);
-		s_video.published_height.store(s_video.height, std::memory_order_relaxed);
-		s_video.published_stride.store(s_video.stride, std::memory_order_relaxed);
+		{
+			std::lock_guard lock(s_video.mutex);
+			++s_video.sequence;
+			s_video.buffer_seq[s_video.write_idx] = s_video.sequence;
+			std::swap(s_video.write_idx, s_video.published_idx);
+			s_video.published_fresh = true;
+			s_video.width = width;
+			s_video.height = height;
+			s_video.stride = width;
+		}
+		s_video.published_width.store(width, std::memory_order_relaxed);
+		s_video.published_height.store(height, std::memory_order_relaxed);
+		s_video.published_stride.store(width, std::memory_order_relaxed);
 		s_video.published_sequence.store(s_video.sequence, std::memory_order_release);
 
 		{
@@ -200,10 +220,11 @@ public:
 			{
 				__android_log_print(ANDROID_LOG_INFO, kLogTag,
 					"TCVR_SOUND framebuffer capture: mean %.2f ms, worst %.2f ms over %llu frames"
-					" (a frame is 16.67 ms)",
+					" (a frame is 16.67 ms) | frameskip level=%d speed=%.1f%%",
 					double(s_video.capture_us) / double(s_video.capture_frames) / 1000.0,
 					double(s_video.capture_worst_us) / 1000.0,
-					(unsigned long long)s_video.capture_frames);
+					(unsigned long long)s_video.capture_frames,
+					m_machine->video().effective_frameskip(), m_machine->video().speed_percent() * 100.0);
 				s_video.capture_us = 0;
 				s_video.capture_worst_us = 0;
 				s_video.capture_frames = 0;
@@ -564,11 +585,12 @@ extern "C" int tcvr_mame_boot_smoke(const char *driver_id, const char *rom_path,
 			height = s_video.height;
 			stride = s_video.stride;
 			sequence = s_video.sequence;
+			std::vector<std::uint32_t> const &last = s_video.buffers[s_video.published_idx];
 			std::size_t nonzero = 0;
-			for (std::uint32_t pixel : s_video.pixels)
+			for (std::uint32_t pixel : last)
 				nonzero += (pixel & 0x00ffffffU) != 0;
 			__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_M3 final framebuffer pixels=%zu/%zu first=0x%08x",
-				nonzero, s_video.pixels.size(), s_video.pixels.empty() ? 0U : s_video.pixels.front());
+				nonzero, last.size(), last.empty() ? 0U : last.front());
 		}
 		__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_M2 boot result=%d frames=%d video=%dx%d stride=%d seq=%llu", result, *frame_count, width, height, stride, static_cast<unsigned long long>(sequence));
 		return result;
@@ -593,13 +615,38 @@ extern "C" int tcvr_mame_latest_video_info(int *width, int *height, int *stride,
 	return published != 0 ? 1 : 0;
 }
 
+// Hands the reader the newest published buffer without copying it. The pointer
+// stays valid until the next acquire, because the writer can never reach the
+// buffer the reader currently holds. Returns nullptr before the first frame.
+extern "C" const std::uint32_t *tcvr_mame_acquire_latest_video(int *width, int *height, int *stride, std::uint64_t *sequence)
+{
+	std::lock_guard lock(s_video.mutex);
+	if (s_video.published_fresh)
+	{
+		std::swap(s_video.read_idx, s_video.published_idx);
+		s_video.published_fresh = false;
+	}
+	std::vector<std::uint32_t> const &buffer = s_video.buffers[s_video.read_idx];
+	if (buffer.empty())
+		return nullptr;
+	if (width) *width = s_video.width;
+	if (height) *height = s_video.height;
+	if (stride) *stride = s_video.stride;
+	if (sequence) *sequence = s_video.buffer_seq[s_video.read_idx];
+	return buffer.data();
+}
+
 extern "C" std::size_t tcvr_mame_copy_latest_video(std::uint32_t *destination, std::size_t destination_pixels)
 {
 	if (!destination)
 		return 0;
-	std::lock_guard lock(s_video.mutex);
-	std::size_t const count = std::min(destination_pixels, s_video.pixels.size());
-	std::memcpy(destination, s_video.pixels.data(), count * sizeof(std::uint32_t));
+	int w = 0, h = 0, st = 0;
+	std::uint64_t seq = 0;
+	const std::uint32_t *source = tcvr_mame_acquire_latest_video(&w, &h, &st, &seq);
+	if (!source)
+		return 0;
+	std::size_t const count = std::min(destination_pixels, std::size_t(st) * std::size_t(h));
+	std::memcpy(destination, source, count * sizeof(std::uint32_t));
 	return count;
 }
 

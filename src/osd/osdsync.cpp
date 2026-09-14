@@ -142,16 +142,17 @@ int osd_get_num_processors(bool heavy_mt)
 			if (forced > 0)
 				threads = unsigned(forced);
 		}
-		else
-		{
-			threads = std::thread::hardware_concurrency();
-		}
+		// Otherwise: the cores the scheduler actually grants (3 on a Quest 3),
+		// which the affinity read above already put in `threads`. Measured on
+		// real play: 4 raster threads on 3 cores made 96%, 2 made 86%. Three --
+		// one per core, with the XR renderer trimmed so it mostly sleeps -- is
+		// the configuration that matches the machine and had never been tried
+		// in play.
 	}
 	if (threads < 1)
 		threads = 1;
 	__android_log_print(ANDROID_LOG_INFO, "TCVR_MAME",
-		"TCVR_SOUND worker pool sized to %u (cores allowed to this process, minus one for the renderer)",
-		threads);
+		"TCVR_SOUND worker pool sized to %u (cores the scheduler grants this process)", threads);
 	return heavy_mt ? threads : std::min(threads, 4U);
 #endif
 }
