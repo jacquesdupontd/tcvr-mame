@@ -287,6 +287,9 @@ protected:
 	u32 m_tcvr_tex_dirty[2][TCVR_TEX_BLOCKS / 32]{};
 	u64 m_tcvr_tex_writes[2]{};
 	u64 m_tcvr_tex_generation = 0;
+	bool m_tcvr_scene_had_geometry = false;
+	bool m_tcvr_scene_geometry_unchanged = false;
+	std::vector<u32> m_tcvr_back2d;
 	void tcvr_m2_publish_scene(const rectangle &cliprect);
 	void tcvr_tex_mark(unsigned sheet, offs_t word_index)
 	{

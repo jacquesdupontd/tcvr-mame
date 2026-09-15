@@ -95,6 +95,14 @@ struct tcvr_m2_frame
 	// only the 3D would otherwise cover it. 0 means transparent, as in
 	// copybitmap_trans. These are ROM bitmaps: they gain nothing from being
 	// magnified, so a consumer should blit them nearest-neighbour.
+	// The frame as it stands BEFORE any polygon is drawn: the background colour
+	// plus the System 24 layers that go behind the 3D.
+	//
+	// A GPU pass must composite on THIS, not on the finished emulator
+	// framebuffer -- that one already contains the CPU rasteriser's own 3D, so
+	// using it mixes two renderers: sharp where the GPU paints, blurry from the
+	// CPU where it does not, with incoherent seams between them.
+	const uint32_t *back2d;  uint32_t back2d_stride;
 	const uint32_t *front2d; uint32_t front2d_stride;
 	const uint32_t *textureram[2]; uint32_t textureram_words;
 	const uint32_t *dirty[2];      uint32_t dirty_words, dirty_blocks, dirty_block_words;
@@ -104,6 +112,17 @@ struct tcvr_m2_frame
 	uint32_t dropped_prims, dropped_vertices;
 	// Screen offsets that go with tcvr_m2_prim::center_x/y.
 	int32_t crtc_xoffset, crtc_yoffset;
+	// 1 when the geometrizer presented no new list this frame: MAME reuses its
+	// previous 3D (the `if (m_render_done)` path in render_polygons) and only
+	// redraws the 2D layers. The vertex and primitive arrays are then EMPTY and
+	// a consumer must keep the geometry it already has, while still refreshing
+	// the 2D layers and the colour chain.
+	//
+	// Measured: on a menu screen, 60 frames out of 60 take that path. Not
+	// publishing on those frames left the GPU image frozen on an old scene
+	// while the game updated its HUD -- which is what made the game's menu
+	// flicker.
+	uint32_t geometry_unchanged;
 };
 
 // Called by the driver, on the emulation thread.

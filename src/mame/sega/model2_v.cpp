@@ -815,6 +815,11 @@ void model2_state::render_polygons(bitmap_rgb32 &bitmap, const rectangle &clipre
 	if (m_render_done)
 	{
 		copybitmap_trans(bitmap, m_renderer->destmap(), 0, 0, 0, 0, cliprect, 0x00000000);
+		// Still open a recording, so the frame gets published with empty
+		// geometry and geometry_unchanged set. Without this, the consumer's
+		// image freezes on an old scene while the 2D layers keep moving.
+		m_tcvr_scene_geometry_unchanged = true;
+		tcvr_m2_scene_begin(cliprect.width(), cliprect.height());
 		return;
 	}
 
@@ -836,6 +841,8 @@ void model2_state::render_polygons(bitmap_rgb32 &bitmap, const rectangle &clipre
 		if (!armed) { armed = true; if (tcvr_m2_record_requested()) tcvr_m2_scene_enable(1); }
 	}
 #endif
+	m_tcvr_scene_had_geometry = true;
+	m_tcvr_scene_geometry_unchanged = false;
 	tcvr_m2_scene_begin(cliprect.width(), cliprect.height());
 
 	for (int window = raster->cur_window; window >= 0; window--)
@@ -2591,10 +2598,13 @@ void model2_state::tcvr_m2_publish_scene(const rectangle &cliprect)
 		fp.dirty_generation = m_tcvr_tex_generation;
 		// The priority tilemaps, as drawn over the polygons. bitmap_rgb32 rows
 		// are rowpixels() apart, not width.
+		fp.back2d = m_tcvr_back2d.empty() ? nullptr : m_tcvr_back2d.data();
+		fp.back2d_stride = u32(cliprect.width());
 		fp.front2d = &m_sys24_bitmap.pix(0);
 		fp.front2d_stride = u32(m_sys24_bitmap.rowpixels());
 		fp.crtc_xoffset = m_crtc_xoffset;
 		fp.crtc_yoffset = m_crtc_yoffset;
+		fp.geometry_unchanged = m_tcvr_scene_geometry_unchanged ? 1u : 0u;
 		tcvr_m2_scene_end(&fp);
 
 #if defined(__ANDROID__)
@@ -2630,6 +2640,7 @@ void model2_state::tcvr_m2_publish_scene(const rectangle &cliprect)
 #endif
 		// Cleared only once the frame carrying it is published, so no write is
 		// lost between two frames.
+		m_tcvr_scene_had_geometry = false;
 		std::memset(m_tcvr_tex_dirty, 0, sizeof(m_tcvr_tex_dirty));
 		m_tcvr_tex_writes[0] = m_tcvr_tex_writes[1] = 0;
 		m_tcvr_tex_generation++;
@@ -2647,14 +2658,22 @@ void model2_state::tcvr_m2_publish_scene(const rectangle &cliprect)
 		// A diagnostic must never consume what it observes.
 		if (tcvr_m2_scene_mode())
 		{
-			static unsigned count = 0;
+			// Per-frame shape of the publication, which is what a flickering
+			// static screen would show: how many frames carried geometry, how
+			// many bailed out early (nothing published, so the consumer keeps
+			// the previous scene), and how many polygons when there were any.
+			static unsigned count = 0, withGeom = 0, renderDone = 0, empty = 0;
 			static uint32_t listed = 0;
-			listed += m_raster->poly_list_index;
+			if (m_tcvr_scene_had_geometry) { withGeom++; listed += m_raster->poly_list_index; }
+			else if (m_render_done) renderDone++;
+			else empty++;
 			if (++count == 60)
 			{
 				__android_log_print(ANDROID_LOG_INFO, "TCVR_MODEL2",
-					"driver poly_list avg=%.1f over %u frames", double(listed) / count, count);
-				count = 0; listed = 0;
+					"publish/60f: geometry=%u render_done_reuse=%u empty=%u | avg polys=%.1f",
+					withGeom, renderDone, empty,
+					withGeom ? double(listed) / withGeom : 0.0);
+				count = withGeom = renderDone = empty = 0; listed = 0;
 			}
 		}
 #endif
@@ -2695,6 +2714,15 @@ u32 model2_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, con
 		m_tiles->draw(screen, m_sys24_bitmap, cliprect, layer << 1, 0, 0);
 
 	copybitmap_trans(bitmap, m_sys24_bitmap, 0, 0, 0, 0, cliprect, 0);
+
+	// The frame as it stands before any polygon: this is what a GPU pass has to
+	// composite on. Kept in its own buffer because `bitmap` is about to receive
+	// the CPU rasteriser's 3D on top.
+	m_tcvr_back2d.resize(size_t(cliprect.width()) * size_t(cliprect.height()));
+	for (int y = 0; y < cliprect.height(); y++)
+		std::memcpy(m_tcvr_back2d.data() + size_t(y) * cliprect.width(),
+		            &bitmap.pix(cliprect.top() + y, cliprect.left()),
+		            size_t(cliprect.width()) * 4);
 
 	/* tell the rasterizer we're starting a frame */
 	if (m_render_test_mode == true)
