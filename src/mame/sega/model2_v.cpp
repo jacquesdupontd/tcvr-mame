@@ -512,6 +512,51 @@ void model2_state::model2_3d_process_polygon(raster_state *raster, u32 attr)
 
 	raster->polygon_z = zvalue;
 
+	// TCVR: the polygon as the geometry engine handed it over -- camera space
+	// (x, y already multiplied by the focus, pz = depth), texture coordinates in
+	// texels -- BEFORE the frustum clip below. The immersive presentation needs
+	// what the board throws away outside its own field of view.
+	if (cull == false && tcvr_m2_scene_mode())
+	{
+		tcvr_m2_raw_vertex rv[4];
+		for (int i = 0; i < NumVerts; i++)
+		{
+			rv[i].x = object.v[i].x; rv[i].y = object.v[i].y; rv[i].z = object.v[i].pz;
+			rv[i].u = object.v[i].pu; rv[i].v = object.v[i].pv;
+		}
+		const u8 renderer = (object.texheader[0] >> 13) & 3;
+		tcvr_m2_prim tp{};
+		const int xo = m_renderer->xoffset(), yo = m_renderer->yoffset();
+		tp.clip_l = raster->viewport[0] + xo; tp.clip_r = raster->viewport[2] + xo;
+		tp.clip_t = (384 - raster->viewport[3]) + yo; tp.clip_b = (384 - raster->viewport[1]) + yo;
+		tp.textured = (renderer & 2) ? 1 : 0;
+		tp.translucent = (renderer & 1) ? 1 : 0;
+		tp.checker = (object.texheader[0] >> 15) & 1;
+		tp.lumabase = (object.texheader[1] & 0xff) << 7;
+		tp.colorbase = (object.texheader[3] >> 6) & 0x3ff;
+		tp.luma = object.luma;
+		tp.texlod = object.texlod;
+		if (renderer & 2)
+		{
+			tp.texmirrorx = (object.texheader[0] >> 8) & 1;
+			tp.texmirrory = (object.texheader[0] >> 9) & 1;
+			tp.texwrapx = (object.texheader[0] >> 6) & 1 & ~tp.texmirrorx;
+			tp.texwrapy = (object.texheader[0] >> 7) & 1 & ~tp.texmirrory;
+			tp.texsheet = (object.texheader[2] & 0x1000) ? 1 : 0;
+			tp.texwidth = 32 << ((object.texheader[0] >> 0) & 0x7);
+			tp.texheight = 32 << ((object.texheader[0] >> 3) & 0x7);
+			tp.texx = 32 * ((object.texheader[2] >> 0) & 0x3f);
+			tp.texy = 32 * ((object.texheader[2] >> 6) & 0x1f);
+			tp.utex = (object.texheader[0] >> 12) & 1;
+			tp.utexminlod = (object.texheader[0] >> 10) & 3;
+			tp.utexx = ((object.texheader[2] >> 13) & 1) * 128;
+			tp.utexy = ((object.texheader[2] >> 14) & 3) * 128;
+		}
+		tp.center_x = raster->center[raster->center_sel][0];
+		tp.center_y = raster->center[raster->center_sel][1];
+		tp.zsort = float_to_zval(zvalue, raster->z_adjust);
+		tcvr_m2_scene_raw_poly(rv, NumVerts, &tp);
+	}
 	if (cull == false)
 	{
 		int32_t clipped_verts;
@@ -769,6 +814,7 @@ void model2_state::render_frame_start()
 
 	/* reset the polygon list index */
 	raster->poly_list_index = 0;
+	tcvr_m2_scene_raw_reset();
 
 	/* reset the sorted z list */
 	std::fill(std::begin(raster->poly_sorted_list), std::end(raster->poly_sorted_list), nullptr);

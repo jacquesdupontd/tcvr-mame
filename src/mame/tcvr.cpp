@@ -1308,6 +1308,8 @@ struct tcvr_m2_scene_store
 	{
 		std::vector<tcvr_m2_vertex> vertices;
 		std::vector<tcvr_m2_prim> prims;
+		std::vector<tcvr_m2_raw_vertex> raw_vertices;
+		std::vector<tcvr_m2_prim> raw_prims;
 		std::vector<uint16_t> palram;
 		std::vector<uint16_t> colorxlat;
 		std::vector<uint8_t> lumaram;
@@ -1324,6 +1326,13 @@ struct tcvr_m2_scene_store
 	bool recording = false;
 	uint64_t sequence = 0;
 	uint32_t dropped_prims = 0, dropped_vertices = 0;
+	// Pre-clip stream: the geometry engine runs during the frame, the recorder
+	// (begin/end) only at render time, so raw polygons are gathered whenever the
+	// scene is enabled, reset when the board starts a display list, and the
+	// latest complete list is published with every frame.
+	std::vector<tcvr_m2_raw_vertex> raw_pending_vertices, raw_last_vertices;
+	std::vector<tcvr_m2_prim> raw_pending_prims, raw_last_prims;
+	bool raw_fresh = false;
 	std::atomic<int> enabled{0};
 };
 tcvr_m2_scene_store s_m2_scene;
@@ -1345,6 +1354,16 @@ extern "C" void tcvr_m2_scene_begin(int width, int height)
 	auto &w = s_m2_scene.slots[s_m2_scene.write_idx];
 	w.vertices.clear();
 	w.prims.clear();
+	if (s_m2_scene.raw_fresh)
+	{
+		s_m2_scene.raw_last_vertices.swap(s_m2_scene.raw_pending_vertices);
+		s_m2_scene.raw_last_prims.swap(s_m2_scene.raw_pending_prims);
+		s_m2_scene.raw_pending_vertices.clear();
+		s_m2_scene.raw_pending_prims.clear();
+		s_m2_scene.raw_fresh = false;
+	}
+	w.raw_vertices = s_m2_scene.raw_last_vertices;
+	w.raw_prims = s_m2_scene.raw_last_prims;
 	w.frame.width = width;
 	w.frame.height = height;
 	s_m2_scene.dropped_prims = 0;
@@ -1372,6 +1391,24 @@ extern "C" void tcvr_m2_scene_poly(const tcvr_m2_vertex *v, int count, const tcv
 	w.prims.push_back(q);
 }
 
+extern "C" void tcvr_m2_scene_raw_poly(const tcvr_m2_raw_vertex *v, int count, const tcvr_m2_prim *p)
+{
+	if (!s_m2_scene.enabled.load(std::memory_order_relaxed) || v == nullptr || p == nullptr || count < 3) return;
+	auto &pv = s_m2_scene.raw_pending_vertices;
+	auto &pp = s_m2_scene.raw_pending_prims;
+	if (pp.size() >= k_m2_max_prims || pv.size() + count > k_m2_max_vertices) return;
+	tcvr_m2_prim q = *p;
+	q.first_vertex = uint32_t(pv.size());
+	q.vertex_count = uint32_t(count);
+	pv.insert(pv.end(), v, v + count);
+	pp.push_back(q);
+	s_m2_scene.raw_fresh = true;
+}
+extern "C" void tcvr_m2_scene_raw_reset(void)
+{
+	s_m2_scene.raw_pending_vertices.clear();
+	s_m2_scene.raw_pending_prims.clear();
+}
 extern "C" void tcvr_m2_scene_end(const tcvr_m2_frame *fp)
 {
 	if (!s_m2_scene.recording) return;
@@ -1388,6 +1425,10 @@ extern "C" void tcvr_m2_scene_end(const tcvr_m2_frame *fp)
 	w.frame.vertex_count = uint32_t(w.vertices.size());
 	w.frame.prims = w.prims.data();
 	w.frame.prim_count = uint32_t(w.prims.size());
+	w.frame.raw_vertices = w.raw_vertices.data();
+	w.frame.raw_vertex_count = uint32_t(w.raw_vertices.size());
+	w.frame.raw_prims = w.raw_prims.data();
+	w.frame.raw_prim_count = uint32_t(w.raw_prims.size());
 	w.frame.palram = w.palram.empty() ? nullptr : w.palram.data();
 	w.frame.colorxlat = w.colorxlat.empty() ? nullptr : w.colorxlat.data();
 	w.frame.lumaram = w.lumaram.empty() ? nullptr : w.lumaram.data();

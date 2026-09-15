@@ -712,6 +712,8 @@ public:
 	void model2_3d_render(polygon *poly, const rectangle &cliprect);
 	void set_xoffset(int16_t xoffs) { m_xoffs = xoffs; }
 	void set_yoffset(int16_t yoffs) { m_yoffs = yoffs; }
+	int16_t xoffset() const { return m_xoffs; }
+	int16_t yoffset() const { return m_yoffs; }
 
 	template <bool Translucent>
 	void draw_scanline_solid(int32_t scanline, const extent_t &extent, const m2_poly_extra_data &object, int threadid);

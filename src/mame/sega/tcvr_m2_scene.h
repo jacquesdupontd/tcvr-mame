@@ -46,6 +46,15 @@ struct tcvr_m2_vertex
 	float uoz;      // u/z/8 (pu)
 	float voz;      // v/z/8 (pv)
 };
+// The polygon BEFORE the board clips it to its own field of view: camera
+// space as the geometry engine hands it over (x, y already multiplied by the
+// focus, z = depth), texture coordinates in texels. The immersive
+// presentation is built from this stream; the flat window keeps the other.
+struct tcvr_m2_raw_vertex
+{
+	float x, y, z;
+	float u, v;
+};
 
 // Per-polygon state, one entry per primitive, mirroring m2_poly_extra_data.
 struct tcvr_m2_prim
@@ -71,6 +80,7 @@ struct tcvr_m2_prim
 	// the recorded vertices are already projected. Recovering eye space costs
 	// two multiplications per vertex and no extra emulation.
 	int32_t center_x, center_y;
+	uint32_t zsort;                         // board z bucket (float_to_zval): its draw order, near to far
 };
 
 struct tcvr_m2_frame
@@ -124,6 +134,8 @@ struct tcvr_m2_frame
 	// while the game updated its HUD -- which is what made the game's menu
 	// flicker.
 	uint32_t geometry_unchanged;
+	const tcvr_m2_raw_vertex *raw_vertices; uint32_t raw_vertex_count;   // pre-clip stream, submission order
+	const tcvr_m2_prim       *raw_prims;    uint32_t raw_prim_count;
 };
 
 // Called by the driver, on the emulation thread.
@@ -131,6 +143,8 @@ void tcvr_m2_scene_enable(int mode);   // 0 off, 1 record alongside the CPU rast
 int  tcvr_m2_scene_mode(void);
 void tcvr_m2_scene_begin(int width, int height);
 void tcvr_m2_scene_poly(const tcvr_m2_vertex *v, int count, const tcvr_m2_prim *p);
+void tcvr_m2_scene_raw_poly(const tcvr_m2_raw_vertex *v, int count, const tcvr_m2_prim *p);
+void tcvr_m2_scene_raw_reset(void);   // the board starts a new display list (render_frame_start)
 // The driver fills in width/height and the colour-chain pointers; the
 // recorder copies those tables (about 98 KB) and owns the copies.
 void tcvr_m2_scene_end(const tcvr_m2_frame *frame_params);
