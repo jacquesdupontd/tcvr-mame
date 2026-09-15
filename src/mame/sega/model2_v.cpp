@@ -101,6 +101,33 @@
 #include <sys/system_properties.h>
 #include <chrono>
 namespace {
+// The raster workers draw into destmap while the emulation thread sits in
+// wait("End of frame"). Measured on Quest 3 with srallyc: 2.1-2.7ms of waiting
+// per rendered frame, ~132ms/s, on the one thread that has to keep up with the
+// arcade clock -- while ~160% of the CPU the app is allowed sits idle.
+//
+// So join at the START of the next update instead: by then the workers are
+// done, we publish that finished frame and immediately dispatch the new one.
+// Nothing races, because the join happens before anything touches destmap,
+// fillmap or the extra-data pool, and only one frame is ever in flight.
+//
+// The cost is one frame of latency (16.7ms), and the workers now read palette,
+// colour-translation and texture RAM while the emulation moves on -- so a
+// texture or palette written mid-frame can land one frame early. That is the
+// same trade already accepted on System 22.
+//
+// Set debug.tcvr.m2.asyncRaster=0 to restore the blocking join.
+bool tcvr_async_raster_enabled()
+{
+	// __system_property_get() returns 0 and leaves the buffer empty when the
+	// property is absent, so test the return value, not the buffer.
+	static const bool enabled = [] {
+		char value[PROP_VALUE_MAX] = {};
+		return !(__system_property_get("debug.tcvr.m2.asyncRaster", value) > 0 && value[0] == '0');
+	}();
+	return enabled;
+}
+
 bool tcvr_model2_profile_enabled()
 {
 	static const bool enabled = [] {
@@ -714,7 +741,22 @@ void model2_state::render_polygons(bitmap_rgb32 &bitmap, const rectangle &clipre
 	int32_t z;
 #if defined(__ANDROID__)
 	const bool tcvr_profile = tcvr_model2_profile_enabled();
+	const bool tcvr_async = tcvr_async_raster_enabled();
+	double tcvr_join_ms = 0.0;
+
+	// Join the previous frame's workers before anything below reads destmap or
+	// reuses fillmap and the extra-data pool. See tcvr_async_raster_enabled().
+	if (m_tcvr_raster_inflight)
+	{
+		const auto tcvr_join_start = tcvr_clock::now();
+		m_renderer->wait("End of frame (deferred)");
+		m_tcvr_raster_inflight = false;
+		tcvr_join_ms = tcvr_ms(tcvr_join_start, tcvr_clock::now());
+	}
+
 	const auto tcvr_dispatch_start = tcvr_profile ? tcvr_clock::now() : tcvr_clock::time_point{};
+#else
+	constexpr bool tcvr_async = false;
 #endif
 
 	// if the geometrizer hasn't presented a new frame, just copy the previous frame and bail
@@ -727,6 +769,11 @@ void model2_state::render_polygons(bitmap_rgb32 &bitmap, const rectangle &clipre
 	/* if we have nothing to render, bail */
 	if (raster->poly_list_index == 0)
 		return;
+
+	// Async path: destmap still holds the frame the workers just finished, so
+	// publish it now -- it is about to be cleared for the new one.
+	if (tcvr_async)
+		copybitmap_trans(bitmap, m_renderer->destmap(), 0, 0, 0, 0, cliprect, 0x00000000);
 
 	m_renderer->destmap().fill(0x00000000, cliprect);
 	m_renderer->fillmap().fill(0x00, cliprect);
@@ -760,26 +807,35 @@ void model2_state::render_polygons(bitmap_rgb32 &bitmap, const rectangle &clipre
 #if defined(__ANDROID__)
 	const auto tcvr_wait_start = tcvr_profile ? tcvr_clock::now() : tcvr_clock::time_point{};
 #endif
-	m_renderer->wait("End of frame");
+	if (!tcvr_async)
+		m_renderer->wait("End of frame");
 #if defined(__ANDROID__)
+	else
+		m_tcvr_raster_inflight = true;
+
 	if (tcvr_profile)
 	{
-		static double dispatch_total = 0, wait_total = 0;
+		static double dispatch_total = 0, wait_total = 0, join_total = 0;
 		static unsigned count = 0;
 		dispatch_total += tcvr_ms(tcvr_dispatch_start, tcvr_wait_start);
 		wait_total += tcvr_ms(tcvr_wait_start, tcvr_clock::now());
+		join_total += tcvr_join_ms;
 		if (++count == 60)
 		{
 			__android_log_print(ANDROID_LOG_INFO, "TCVR_MODEL2",
-				"render_polygons avg dispatch=%.3fms wait=%.3fms polygons=%u over %u frames",
-				dispatch_total / count, wait_total / count, raster->poly_list_index, count);
+				"render_polygons avg dispatch=%.3fms wait=%.3fms join=%.3fms polygons=%u over %u frames (async=%d)",
+				dispatch_total / count, wait_total / count, join_total / count,
+				raster->poly_list_index, count, tcvr_async ? 1 : 0);
 			count = 0;
-			dispatch_total = wait_total = 0;
+			dispatch_total = wait_total = join_total = 0;
 		}
 	}
 #endif
 
-	copybitmap_trans(bitmap, m_renderer->destmap(), 0, 0, 0, 0, cliprect, 0x00000000);
+	// On the async path the frame is published at the top of the next update,
+	// once the workers have actually finished it.
+	if (!tcvr_async)
+		copybitmap_trans(bitmap, m_renderer->destmap(), 0, 0, 0, 0, cliprect, 0x00000000);
 
 	m_render_done = true;
 }

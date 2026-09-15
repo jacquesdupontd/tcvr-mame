@@ -273,6 +273,9 @@ private:
 	bool m_render_mode = false;
 	bool m_render_test_mode = false;
 	bool m_render_done = false;
+	// True while the raster workers are still finishing the previous frame.
+	// Only ever set on the deferred-join path (Android); see render_polygons().
+	bool m_tcvr_raster_inflight = false;
 	int16_t m_crtc_xoffset = 0, m_crtc_yoffset = 0;
 	bool m_palette_dirty = false;
 
