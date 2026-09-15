@@ -10,6 +10,68 @@
 
 #include "emu.h"
 #include "debugger.h"
+#if defined(__ANDROID__)
+#include <android/log.h>
+#include <sys/system_properties.h>
+#include <array>
+#include <chrono>
+namespace {
+using tcvr_sched_clock = std::chrono::steady_clock;
+struct tcvr_sched_entry {
+	device_execute_interface *device = nullptr;
+	std::uint64_t nanoseconds = 0;
+	unsigned samples = 0;
+	unsigned calls = 0;
+};
+bool tcvr_sched_profile_enabled()
+{
+	static const bool enabled = [] {
+		char value[PROP_VALUE_MAX] = {};
+		return __system_property_get("debug.tcvr.schedprofile", value) > 0 && value[0] == '1';
+	}();
+	return enabled;
+}
+void tcvr_sched_account(running_machine &machine, device_execute_interface &device,
+		bool sampled, tcvr_sched_clock::time_point start)
+{
+	static running_machine *last_machine = nullptr;
+	static std::array<tcvr_sched_entry, 16> entries{};
+	static tcvr_sched_clock::time_point last_report = tcvr_sched_clock::now();
+	if (last_machine != &machine) {
+		entries = {};
+		last_machine = &machine;
+		last_report = tcvr_sched_clock::now();
+	}
+	for (auto &entry : entries) {
+		if (!entry.device || entry.device == &device) {
+			entry.device = &device;
+			if (sampled) {
+				entry.nanoseconds += std::chrono::duration_cast<std::chrono::nanoseconds>(tcvr_sched_clock::now() - start).count();
+				++entry.samples;
+			}
+			++entry.calls;
+			break;
+		}
+	}
+	if (!sampled) return;
+	const auto end = tcvr_sched_clock::now();
+	if (end - last_report >= std::chrono::seconds(1)) {
+		for (auto &entry : entries) {
+			if (entry.device && entry.calls) {
+				__android_log_print(ANDROID_LOG_INFO, "TCVR_SCHED",
+					"device=%s sampled=%.3fms/s samples=%u calls=%u",
+					entry.device->device().tag(), double(entry.nanoseconds) / 1000000.0 * 1024.0,
+					entry.samples, entry.calls);
+				entry.nanoseconds = 0;
+				entry.samples = 0;
+				entry.calls = 0;
+			}
+		}
+		last_report = end;
+	}
+}
+}
+#endif
 
 //**************************************************************************
 //  DEBUGGING
@@ -420,6 +482,9 @@ void device_scheduler::timeslice()
 			apply_suspend_changes();
 
 		// loop over all CPUs
+		#if defined(__ANDROID__)
+		const bool tcvr_sched_profile = tcvr_sched_profile_enabled();
+		#endif
 		for (device_execute_interface *exec = m_execute_list; exec != nullptr; exec = exec->m_nextexec)
 		{
 			// only process if this CPU is executing or truly halted (not yielding)
@@ -453,6 +518,11 @@ void device_scheduler::timeslice()
 						exec->m_cycles_stolen = 0;
 						m_executing_device = exec;
 						*exec->m_icountptr = exec->m_cycles_running;
+						#if defined(__ANDROID__)
+						static unsigned tcvr_sched_sample_counter = 0;
+						const bool tcvr_device_sampled = tcvr_sched_profile && (++tcvr_sched_sample_counter & 1023u) == 0;
+						const auto tcvr_device_start = tcvr_device_sampled ? tcvr_sched_clock::now() : tcvr_sched_clock::time_point{};
+						#endif
 						if (!call_debugger)
 							exec->run();
 						else
@@ -461,6 +531,10 @@ void device_scheduler::timeslice()
 							exec->run();
 							exec->debugger_stop_cpu_hook();
 						}
+						#if defined(__ANDROID__)
+						if (tcvr_sched_profile)
+							tcvr_sched_account(machine(), *exec, tcvr_device_sampled, tcvr_device_start);
+						#endif
 
 						// adjust for any cycles we took back
 						assert(ran >= *exec->m_icountptr);
