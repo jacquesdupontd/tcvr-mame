@@ -112,6 +112,7 @@ struct tcvr_m2_frame
 	uint32_t dropped_prims, dropped_vertices;
 	// Screen offsets that go with tcvr_m2_prim::center_x/y.
 	int32_t crtc_xoffset, crtc_yoffset;
+	float focus_x, focus_y;   // geo_state::focus, applied to x_eye/y_eye before the divide
 	// 1 when the geometrizer presented no new list this frame: MAME reuses its
 	// previous 3D (the `if (m_render_done)` path in render_polygons) and only
 	// redraws the 2D layers. The vertex and primitive arrays are then EMPTY and

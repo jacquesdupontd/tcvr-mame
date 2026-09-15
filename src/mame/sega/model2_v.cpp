@@ -2599,6 +2599,7 @@ void model2_state::tcvr_m2_publish_scene(const rectangle &cliprect)
 		fp.colorxlat = m_colorxlat.get(); fp.colorxlat_entries = 0xc000 / 2;
 		fp.lumaram = m_lumaram.get();     fp.lumaram_entries = 0x8000;
 		fp.gamma = m_gamma_table;         fp.gamma_entries = 256;
+		fp.focus_x = m_geo ? m_geo->focus.x : 0.0f; fp.focus_y = m_geo ? m_geo->focus.y : 0.0f;
 		// The sheets are handed over in place; only the dirty masks are copied.
 		fp.textureram[0] = m_textureram0;
 		fp.textureram[1] = m_textureram1;
