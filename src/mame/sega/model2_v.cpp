@@ -667,7 +667,13 @@ void model2_state::model2_3d_process_polygon(raster_state *raster, u32 attr)
 
 void model2_renderer::model2_3d_render(polygon *poly, const rectangle &cliprect)
 {
-	m2_poly_extra_data& extra = object_data().next();
+	// TCVR mode 2: the GPU draws the scene, so nothing is queued here. Then
+	// poly_manager::wait() returns early and never recycles its object pool,
+	// and one entry per primitive grows the overflow chain every frame -- the
+	// System 22 backend measured its scene walk climbing to 60 ms that way
+	// (namcos22_v.cpp:390). A local keeps the pool untouched.
+	m2_poly_extra_data tcvr_local_extra;
+	m2_poly_extra_data& extra = (tcvr_m2_scene_mode() >= 2) ? tcvr_local_extra : object_data().next();
 
 	/* select renderer based on attributes (bit14 = textured, bit13 = transparent) */
 	u8 renderer = (poly->texheader[0] >> 13) & 3;
@@ -751,6 +757,18 @@ void model2_renderer::model2_3d_render(polygon *poly, const rectangle &cliprect)
 		tp.center_y = poly->center[1];
 		tcvr_m2_scene_poly(tv, tn, &tp);
 	}
+
+	// TCVR mode 2: the immersive pass rasterises this scene on the GPU, from the
+	// stream recorded above, and never reads MAME's destmap. Rasterising it a
+	// second time on the CPU costs 9.5-11.0 ms per frame -- measured as the
+	// `dispatch` figure of the render_polygons probe, with wait and join at
+	// zero -- which is nearly all of screen_update's 10-11.2 ms and is what
+	// dropped the emulation to frameskip 8 at 91-92% speed.
+	//
+	// Mode 1 still rasterises: the flat x4 window composites on the emulator's
+	// own frame and uses it as its fallback, so that path is left alone.
+	if (tcvr_m2_scene_mode() >= 2)
+		return;
 
 	switch (poly->num_vertices)
 	{
@@ -903,6 +921,29 @@ void model2_state::render_polygons(bitmap_rgb32 &bitmap, const rectangle &clipre
 	m_tcvr_scene_geometry_unchanged = false;
 	m_tcvr_publish_path = 0;
 	tcvr_m2_scene_begin(cliprect.width(), cliprect.height());
+
+	// TCVR mode 2: skip the WHOLE dispatch loop, not just the rasteriser.
+	//
+	// The immersive consumer draws from the PRE-CLIP stream, captured earlier in
+	// model2_3d_process_polygon, and never binds the clipped one (gpu_renderer
+	// binds m_rawIbo / m_rawPrimSsbo and leaves m_ibo alone). Everything this
+	// loop produces -- model2_3d_project, the texture-attribute decode inside
+	// model2_3d_render, the clipped scene record, the submission -- is therefore
+	// dead work in that mode.
+	//
+	// Measured on srallyc: skipping only the submission moved `dispatch` from
+	// 9.5-11.0 ms to 7.5-9.5 ms, and an image with just 449 polygons still cost
+	// 7.88 ms -- 17 us per polygon, which does not follow the polygon count.
+	// That is what proved the cost was here and not in the rasteriser.
+	//
+	// destmap stays as it was cleared above: in this mode nothing reads it. The
+	// 2D layers are untouched, being produced by screen_update either side of
+	// this call.
+	if (tcvr_m2_scene_mode() >= 2)
+	{
+		m_render_done = true;
+		return;
+	}
 
 	for (int window = raster->cur_window; window >= 0; window--)
 	{

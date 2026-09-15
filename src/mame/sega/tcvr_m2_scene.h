@@ -139,7 +139,11 @@ struct tcvr_m2_frame
 };
 
 // Called by the driver, on the emulation thread.
-void tcvr_m2_scene_enable(int mode);   // 0 off, 1 record alongside the CPU raster
+// 0 off; 1 record alongside MAME's CPU rasteriser; 2 record INSTEAD of it --
+// the consumer draws the scene itself and never reads destmap, which saves the
+// 9.5-11.0 ms per frame the CPU raster costs on srallyc. Same convention as the
+// System 22 backend (tcvr_scene_mode() >= 2).
+void tcvr_m2_scene_enable(int mode);
 int  tcvr_m2_scene_mode(void);
 void tcvr_m2_scene_begin(int width, int height);
 void tcvr_m2_scene_poly(const tcvr_m2_vertex *v, int count, const tcvr_m2_prim *p);

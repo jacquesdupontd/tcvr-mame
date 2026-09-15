@@ -1340,7 +1340,13 @@ tcvr_m2_scene_store s_m2_scene;
 
 extern "C" void tcvr_m2_scene_enable(int mode)
 {
-	s_m2_scene.enabled.store(std::clamp(mode, 0, 1), std::memory_order_relaxed);
+	// 0 off, 1 record alongside MAME's CPU raster, 2 record INSTEAD of it.
+	//
+	// This used to clamp to 1, which silently turned every request for mode 2
+	// into mode 1: the driver's skip never fired and the saving never appeared.
+	// The tell was that render_polygons kept printing its profile line at all --
+	// the skip returns before that print, so a mode-2 frame cannot log it.
+	s_m2_scene.enabled.store(std::clamp(mode, 0, 2), std::memory_order_relaxed);
 }
 
 extern "C" int tcvr_m2_scene_mode(void)
