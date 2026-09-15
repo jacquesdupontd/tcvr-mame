@@ -288,6 +288,11 @@ protected:
 	u64 m_tcvr_tex_writes[2]{};
 	u64 m_tcvr_tex_generation = 0;
 	bool m_tcvr_scene_had_geometry = false;
+	// Which exit of render_polygons() produced the published frame.
+	// 0 = a fresh display list was rasterised, 1 = the `m_render_done` image
+	// reuse path, 2 = an empty display list. Read by the diagnostic, which must
+	// sample it BEFORE the per-frame flags are cleared.
+	uint8_t m_tcvr_publish_path = 0;
 	bool m_tcvr_scene_geometry_unchanged = false;
 	std::vector<u32> m_tcvr_back2d;
 	void tcvr_m2_publish_scene(const rectangle &cliprect);

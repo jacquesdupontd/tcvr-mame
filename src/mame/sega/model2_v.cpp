@@ -819,13 +819,25 @@ void model2_state::render_polygons(bitmap_rgb32 &bitmap, const rectangle &clipre
 		// geometry and geometry_unchanged set. Without this, the consumer's
 		// image freezes on an old scene while the 2D layers keep moving.
 		m_tcvr_scene_geometry_unchanged = true;
+		m_tcvr_publish_path = 1;
 		tcvr_m2_scene_begin(cliprect.width(), cliprect.height());
 		return;
 	}
 
 	/* if we have nothing to render, bail */
 	if (raster->poly_list_index == 0)
+	{
+		// Publish an EXPLICITLY EMPTY scene. MAME reaches here without copying
+		// destmap, so its 3D simply is not on screen this frame. A consumer
+		// that instead kept its previous geometry would go on drawing the last
+		// screen's 3D -- which showed as the attract mode's spinning cars
+		// visible behind the game's menus.
+		m_tcvr_scene_had_geometry = true;
+		m_tcvr_scene_geometry_unchanged = false;
+		m_tcvr_publish_path = 2;
+		tcvr_m2_scene_begin(cliprect.width(), cliprect.height());
 		return;
+	}
 
 	// Async path: destmap still holds the frame the workers just finished, so
 	// publish it now -- it is about to be cleared for the new one.
@@ -843,6 +855,7 @@ void model2_state::render_polygons(bitmap_rgb32 &bitmap, const rectangle &clipre
 #endif
 	m_tcvr_scene_had_geometry = true;
 	m_tcvr_scene_geometry_unchanged = false;
+	m_tcvr_publish_path = 0;
 	tcvr_m2_scene_begin(cliprect.width(), cliprect.height());
 
 	for (int window = raster->cur_window; window >= 0; window--)
@@ -2638,6 +2651,14 @@ void model2_state::tcvr_m2_publish_scene(const rectangle &cliprect)
 			}
 		}
 #endif
+		// Sampled before the clear below. The previous version of the
+		// diagnostic read m_tcvr_scene_had_geometry AFTER this reset, so it
+		// reported "no geometry" on every single frame whatever path had run,
+		// and fell through to a test of m_render_done that is always true here
+		// (set at the end of the rasterisation). It measured nothing.
+		const uint8_t tcvr_published_path = m_tcvr_publish_path;
+		const uint32_t tcvr_published_polys = m_raster->poly_list_index;
+
 		// Cleared only once the frame carrying it is published, so no write is
 		// lost between two frames.
 		m_tcvr_scene_had_geometry = false;
@@ -2664,8 +2685,8 @@ void model2_state::tcvr_m2_publish_scene(const rectangle &cliprect)
 			// the previous scene), and how many polygons when there were any.
 			static unsigned count = 0, withGeom = 0, renderDone = 0, empty = 0;
 			static uint32_t listed = 0;
-			if (m_tcvr_scene_had_geometry) { withGeom++; listed += m_raster->poly_list_index; }
-			else if (m_render_done) renderDone++;
+			if (tcvr_published_path == 0) { withGeom++; listed += tcvr_published_polys; }
+			else if (tcvr_published_path == 1) renderDone++;
 			else empty++;
 			if (++count == 60)
 			{
