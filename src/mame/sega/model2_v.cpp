@@ -96,6 +96,26 @@
 
 #include <cmath>
 #include <limits>
+#if defined(__ANDROID__)
+#include <android/log.h>
+#include <sys/system_properties.h>
+#include <chrono>
+namespace {
+bool tcvr_model2_profile_enabled()
+{
+	static const bool enabled = [] {
+		char value[PROP_VALUE_MAX] = {};
+		return __system_property_get("debug.tcvr.model2profile", value) > 0 && value[0] == '1';
+	}();
+	return enabled;
+}
+using tcvr_clock = std::chrono::steady_clock;
+double tcvr_ms(tcvr_clock::time_point start, tcvr_clock::time_point end)
+{
+	return std::chrono::duration<double, std::milli>(end - start).count();
+}
+}
+#endif
 
 #define pz      p[0]
 #define pu      p[1]
@@ -692,6 +712,10 @@ void model2_state::render_polygons(bitmap_rgb32 &bitmap, const rectangle &clipre
 {
 	raster_state *raster = m_raster.get();
 	int32_t z;
+#if defined(__ANDROID__)
+	const bool tcvr_profile = tcvr_model2_profile_enabled();
+	const auto tcvr_dispatch_start = tcvr_profile ? tcvr_clock::now() : tcvr_clock::time_point{};
+#endif
 
 	// if the geometrizer hasn't presented a new frame, just copy the previous frame and bail
 	if (m_render_done)
@@ -733,7 +757,27 @@ void model2_state::render_polygons(bitmap_rgb32 &bitmap, const rectangle &clipre
 			}
 		}
 	}
+#if defined(__ANDROID__)
+	const auto tcvr_wait_start = tcvr_profile ? tcvr_clock::now() : tcvr_clock::time_point{};
+#endif
 	m_renderer->wait("End of frame");
+#if defined(__ANDROID__)
+	if (tcvr_profile)
+	{
+		static double dispatch_total = 0, wait_total = 0;
+		static unsigned count = 0;
+		dispatch_total += tcvr_ms(tcvr_dispatch_start, tcvr_wait_start);
+		wait_total += tcvr_ms(tcvr_wait_start, tcvr_clock::now());
+		if (++count == 60)
+		{
+			__android_log_print(ANDROID_LOG_INFO, "TCVR_MODEL2",
+				"render_polygons avg dispatch=%.3fms wait=%.3fms polygons=%u over %u frames",
+				dispatch_total / count, wait_total / count, raster->poly_list_index, count);
+			count = 0;
+			dispatch_total = wait_total = 0;
+		}
+	}
+#endif
 
 	copybitmap_trans(bitmap, m_renderer->destmap(), 0, 0, 0, 0, cliprect, 0x00000000);
 
@@ -2406,6 +2450,10 @@ void model2_state::video_start()
 
 u32 model2_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, const rectangle &cliprect)
 {
+#if defined(__ANDROID__)
+	const bool tcvr_profile = tcvr_model2_profile_enabled();
+	const auto tcvr_screen_start = tcvr_profile ? tcvr_clock::now() : tcvr_clock::time_point{};
+#endif
 	// if the scroll color table was written to, we need to refresh the palette
 	if (m_palette_dirty)
 	{
@@ -2448,5 +2496,20 @@ u32 model2_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, con
 
 	copybitmap_trans(bitmap, m_sys24_bitmap, 0, 0, 0, 0, cliprect, 0);
 
+#if defined(__ANDROID__)
+	if (tcvr_profile)
+	{
+		static double screen_total = 0;
+		static unsigned count = 0;
+		screen_total += tcvr_ms(tcvr_screen_start, tcvr_clock::now());
+		if (++count == 60)
+		{
+			__android_log_print(ANDROID_LOG_INFO, "TCVR_MODEL2",
+				"screen_update avg total=%.3fms over %u frames", screen_total / count, count);
+			count = 0;
+			screen_total = 0;
+		}
+	}
+#endif
 	return 0;
 }

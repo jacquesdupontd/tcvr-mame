@@ -109,6 +109,9 @@ struct tcvr_audio_store
 	std::int64_t ratio_fine = std::int64_t(65536) << 8;  // 16.16 << 8, smoothed playback ratio
 	std::int64_t ratio_applied = std::int64_t(65536) << 8;  // slew-limited output ratio
 	std::int64_t rate_measured = 65536;   // 16.16, the producer's measured rate
+	std::atomic<int> policy_floor_ppm{ 990000 };
+	std::atomic<bool> policy_follow_producer{ false };
+	std::atomic<int> policy_cushion_ms{ 120 };
 	std::uint64_t rate_last_write = 0;    // write cursor at the last measurement
 	std::size_t rate_output = 0;          // output frames since the last measurement
 	std::int16_t last[2] = { 0, 0 };
@@ -722,6 +725,20 @@ extern "C" int tcvr_mame_audio_info(int *rate, int *channels, std::uint64_t *wri
 	return 1;
 }
 
+// Generic audio policy chosen by the frontend profile, never by a hardcoded
+// game ID in MAME. The default is the proven 1% cushion-only reader.
+extern "C" void tcvr_mame_audio_configure(int floor_ppm, bool follow_producer, int cushion_ms)
+{
+	if (floor_ppm < 700000 || floor_ppm > 1000000) floor_ppm = 990000;
+	if (cushion_ms < 80 || cushion_ms > 250) cushion_ms = 120;
+	s_audio.policy_floor_ppm.store(floor_ppm, std::memory_order_release);
+	s_audio.policy_follow_producer.store(follow_producer, std::memory_order_release);
+	s_audio.policy_cushion_ms.store(cushion_ms, std::memory_order_release);
+	__android_log_print(ANDROID_LOG_INFO, kLogTag,
+		"TCVR_SOUND policy floorPpm=%d followProducer=%d cushionMs=%d",
+		floor_ppm, follow_producer ? 1 : 0, cushion_ms);
+}
+
 // Raw counters, cumulative since start. No interpretation, no thresholds --
 // whoever reads them decides what "often" means.
 extern "C" void tcvr_mame_audio_stats(std::uint64_t *callbacks, std::uint64_t *underruns, std::uint64_t *stretches,
@@ -777,7 +794,8 @@ extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size
 	// 120 ms. At 80 ms a single emulator stumble emptied it; the extra 40 ms of
 	// latency is well under what a gunshot's delay would make noticeable, and it
 	// buys roughly half a second more tolerance to a speed dip.
-	std::uint64_t const target = std::uint64_t(s_audio.rate) * 120u / 1000u;
+	std::uint64_t const target = std::uint64_t(s_audio.rate) *
+		std::uint64_t(s_audio.policy_cushion_ms.load(std::memory_order_acquire)) / 1000u;
 
 	s_audio.callbacks.fetch_add(1, std::memory_order_relaxed);
 	{
@@ -922,7 +940,8 @@ extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size
 	// the proportional term with the only job it is good at -- nudging the cushion
 	// back to where it should sit.
 	s_audio.rate_output += destination_frames;
-	if (s_audio.rate_output >= std::size_t(s_audio.rate) / 4)
+	const bool follow_producer = s_audio.policy_follow_producer.load(std::memory_order_acquire);
+	if (s_audio.rate_output >= std::size_t(s_audio.rate) / (follow_producer ? 1 : 4))
 	{
 		if (s_audio.rate_last_write != 0 && write_frame > s_audio.rate_last_write)
 		{
@@ -942,7 +961,8 @@ extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size
 
 	std::int64_t const error = std::int64_t(available) - std::int64_t(target);
 	std::int64_t const span = std::int64_t(s_audio.rate) * 4;
-	std::int64_t aim = 65536 + (span > 0 ? (error * 65536) / span : 0);
+	std::int64_t aim = (follow_producer ? s_audio.rate_measured : 65536) +
+		(span > 0 ? (error * 65536) / span : 0);
 	// Asymmetric on purpose. Consuming too slowly costs latency, and the ceiling
 	// above already bounds that. Consuming too fast costs SILENCE, which is what
 	// is actually being heard. Measured during the failure, MAME was producing at
@@ -950,7 +970,8 @@ extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size
 	// structurally faster than the producer, so the buffer could only ever empty.
 	// One percent, about seventeen cents. Enough to walk a drained cushion back
 	// to target over a few seconds, far too little to be heard as a bend.
-	std::int64_t const lowest = 65536 - 65536 / 100;
+	std::int64_t const lowest = std::int64_t(65536) *
+		s_audio.policy_floor_ppm.load(std::memory_order_acquire) / 1000000;
 	std::int64_t const highest = 65536 + 65536 / 100;
 	if (aim < lowest) aim = lowest;
 	if (aim > highest) aim = highest;
@@ -976,7 +997,8 @@ extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size
 		// ratio could not move, the loop was effectively open, and the buffer
 		// filled to the brim. A slew limit must be slow enough to be inaudible
 		// and fast enough to still be a control system.
-		std::int64_t const maximumStep = 900;  // 16.16<<8 counts per callback
+		std::int64_t const maximumStep =
+			(follow_producer && available < target / 2) ? 25000 : 900;
 		std::int64_t delta = s_audio.ratio_fine - s_audio.ratio_applied;
 		if (delta > maximumStep) delta = maximumStep;
 		if (delta < -maximumStep) delta = -maximumStep;
