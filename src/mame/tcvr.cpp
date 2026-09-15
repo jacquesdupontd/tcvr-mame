@@ -1313,6 +1313,7 @@ struct tcvr_m2_scene_store
 		std::vector<uint8_t> lumaram;
 		std::vector<uint8_t> gamma;
 		std::vector<uint32_t> back2d;
+		std::vector<uint32_t> front2d;
 		std::vector<uint32_t> dirty[2];
 		tcvr_m2_frame frame{};
 	};
@@ -1411,6 +1412,20 @@ extern "C" void tcvr_m2_scene_end(const tcvr_m2_frame *fp)
 		w.frame.back2d_stride = uint32_t(fp->width);
 	}
 	else { w.back2d.clear(); w.frame.back2d = nullptr; w.frame.back2d_stride = 0; }
+	// The front 2D layer must be copied too: the frame pointed at the live
+	// m_sys24_bitmap, which the emulator clears and refills with the BACK layers
+	// at the start of the next frame. Read from the render thread, that gave the
+	// menu panels one frame in two -- the flashing with the 3D showing through.
+	if (fp->front2d && fp->front2d_stride && fp->width > 0 && fp->height > 0)
+	{
+		w.front2d.resize(size_t(fp->width) * size_t(fp->height));
+		for (int y = 0; y < fp->height; y++)
+			std::memcpy(w.front2d.data() + size_t(y) * fp->width,
+			            fp->front2d + size_t(y) * fp->front2d_stride, size_t(fp->width) * 4);
+		w.frame.front2d = w.front2d.data();
+		w.frame.front2d_stride = uint32_t(fp->width);
+	}
+	else { w.front2d.clear(); w.frame.front2d = nullptr; w.frame.front2d_stride = 0; }
 
 	for (int sheet = 0; sheet < 2; sheet++)
 	{
