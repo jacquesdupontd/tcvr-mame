@@ -27,6 +27,7 @@ namespace {
 
 constexpr char kLogTag[] = "TCVR_MAME";
 std::atomic<running_machine *> s_tcvr_machine{ nullptr };
+std::atomic<bool> s_tcvr_exit_requested{ false };
 
 // __system_property_get writes an EMPTY string and returns 0 when the property
 // does not exist, so passing a pre-filled buffer as a "default" silently loses
@@ -427,6 +428,12 @@ private:
 	{
 		if (m_machine)
 		{
+			if (s_tcvr_exit_requested.exchange(false, std::memory_order_acq_rel))
+			{
+				__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_M2 graceful game stop requested");
+				m_machine->schedule_exit();
+				return;
+			}
 			// Freeze the emulation on request, so the same frame can be looked at
 			// under every display filter. A debug tool, read once a frame.
 			const bool wantPause = property_flag("debug.tcvr.pause", false);
@@ -475,9 +482,22 @@ private:
 						field->set_value(field->minval() + ioport_value(std::clamp(normalized, 0.0f, 1.0f) * float(range)));
 					}
 			};
-			set_button("INPUTS", 0x0001, coin);
-			if (find_port("ADC.0"))
+			if (find_port("STEER") && find_port("ACCEL"))
 			{
+				// Sega Model 2 driving board. Its I/O tags and START bit do not
+				// match the System 22 ADC/INPUTS wiring; XR still supplies the same
+				// generic steering and pedal values.
+				set_button("IN0", 0x01, coin);
+				set_button("IN0", 0x40, start);
+				set_button("IN0", 0x20, view);
+				set_axis("STEER", steer);
+				set_axis("ACCEL", gas);
+				set_axis("BRAKE", brake);
+				set_axis("IN2", pedal ? 1.0f : 0.0f);
+			}
+			else if (find_port("ADC.0"))
+			{
+			set_button("INPUTS", 0x0001, coin);
 				// A System 22 racer (Dirt Dash, Ridge Racer...): the INPUTS bits mean
 				// view / shift, not trigger / pedal, and the game starts on the gas.
 				set_axis("ADC.0", steer);
@@ -489,6 +509,7 @@ private:
 			}
 			else
 			{
+			set_button("INPUTS", 0x0001, coin);
 				set_button("INPUTS", 0x0010, trigger);
 				set_button("INPUTS", 0x0020, pedal);
 				set_axis("OPT.0", gun_x);
@@ -559,6 +580,11 @@ extern "C" int tcvr_mame_has_driver(const char *driver_id)
 	return driver_id && driver_list::find(driver_id) >= 0;
 }
 
+extern "C" void tcvr_mame_request_exit()
+{
+	s_tcvr_exit_requested.store(true, std::memory_order_release);
+}
+
 // Runs a headless driver selected by the generic C ABI. A positive `seconds`
 // is a test-only bound; zero is the normal continuous arcade runtime. The ROM
 // archive remains at a caller-owned external path and is never copied into the
@@ -607,6 +633,8 @@ extern "C" int tcvr_mame_boot_smoke(const char *driver_id, const char *rom_path,
 		running_machine machine(config, manager);
 		manager.set_machine(&machine);
 		int const result = machine.run(true);
+		s_tcvr_machine.store(nullptr, std::memory_order_release);
+		s_tcvr_exit_requested.store(false, std::memory_order_release);
 		int width = 0;
 		int height = 0;
 		int stride = 0;
@@ -629,6 +657,8 @@ extern "C" int tcvr_mame_boot_smoke(const char *driver_id, const char *rom_path,
 	}
 	catch (std::exception const &error)
 	{
+		s_tcvr_machine.store(nullptr, std::memory_order_release);
+		s_tcvr_exit_requested.store(false, std::memory_order_release);
 		__android_log_print(ANDROID_LOG_ERROR, kLogTag, "TCVR_M2 exception: %s", error.what());
 		return EMU_ERR_FATALERROR;
 	}
@@ -1105,6 +1135,25 @@ struct tcvr_scene_store
 	tcvr_scene_assets assets{};
 };
 tcvr_scene_store s_scene;
+}
+
+extern "C" void tcvr_mame_scene_reset()
+{
+	std::lock_guard lock(s_scene.mutex);
+	s_scene.recording = false;
+	s_scene.fresh = false;
+	s_scene.write_idx = 0;
+	s_scene.published_idx = 1;
+	s_scene.read_idx = 2;
+	for (auto &slot : s_scene.slots)
+	{
+		slot.vertices.clear(); slot.prims.clear(); slot.pens.clear(); slot.czram.clear();
+		slot.text.clear(); slot.gamma.clear(); slot.pri.clear(); slot.spotram.clear();
+		slot.frame = {};
+	}
+	s_scene.sprite_atlas.clear();
+	s_scene.assets = {};
+	s_scene.assets_ready = false;
 }
 
 extern "C" void tcvr_mame_scene_enable(int enabled)
