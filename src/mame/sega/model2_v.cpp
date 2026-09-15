@@ -90,6 +90,7 @@
 
 #include "emu.h"
 #include "model2.h"
+#include "tcvr_m2_scene.h"
 #include "model2rd.ipp"
 
 #include "corefloat.h"
@@ -117,6 +118,18 @@ namespace {
 // same trade already accepted on System 22.
 //
 // Set debug.tcvr.m2.asyncRaster=0 to restore the blocking join.
+// Brick 1 of the GPU backend: record the geometry and prove it matches the
+// walk the CPU rasteriser makes. Nothing is rendered from it yet, so this stays
+// opt-in -- nobody pays for a scene nobody reads.
+bool tcvr_m2_record_requested()
+{
+	static const bool enabled = [] {
+		char value[PROP_VALUE_MAX] = {};
+		return __system_property_get("debug.tcvr.m2.recordScene", value) > 0 && value[0] == '1';
+	}();
+	return enabled;
+}
+
 bool tcvr_async_raster_enabled()
 {
 	// __system_property_get() returns 0 and leaves the buffer empty when the
@@ -655,6 +668,43 @@ void model2_renderer::model2_3d_render(polygon *poly, const rectangle &cliprect)
 		}
 	}
 
+	// Record the same primitive the rasteriser is about to receive, with the
+	// vertices exactly as it will see them: for the textured path pz/pu/pv have
+	// just been turned into 1/z, u/z and v/z above, which are the three values
+	// draw_scanline_tex() interpolates. See tcvr_m2_scene.h.
+	if (tcvr_m2_scene_mode())
+	{
+		tcvr_m2_vertex tv[8];
+		const int tn = (poly->num_vertices > 8) ? 8 : int(poly->num_vertices);
+		for (int i = 0; i < tn; i++)
+		{
+			tv[i].x = poly->v[i].x;
+			tv[i].y = poly->v[i].y;
+			tv[i].ooz = poly->v[i].pz;
+			tv[i].uoz = poly->v[i].pu;
+			tv[i].voz = poly->v[i].pv;
+		}
+		tcvr_m2_prim tp{};
+		tp.clip_l = vp.min_x; tp.clip_t = vp.min_y; tp.clip_r = vp.max_x; tp.clip_b = vp.max_y;
+		tp.textured = (renderer & 2) ? 1 : 0;
+		tp.translucent = (renderer & 1) ? 1 : 0;
+		tp.checker = extra.checker;
+		tp.colorbase = extra.colorbase;
+		tp.lumabase = extra.lumabase;
+		tp.luma = extra.luma;
+		tp.texlod = extra.texlod;
+		// texsheet[0] is textureram1 when this bit is set; record which sheet
+		// rather than a pointer the XR side could not interpret.
+		tp.texsheet = (poly->texheader[2] & 0x1000) ? 1 : 0;
+		tp.texwidth = extra.texwidth; tp.texheight = extra.texheight;
+		tp.texx = extra.texx; tp.texy = extra.texy;
+		tp.texwrapx = extra.texwrapx; tp.texwrapy = extra.texwrapy;
+		tp.texmirrorx = extra.texmirrorx; tp.texmirrory = extra.texmirrory;
+		tp.utex = extra.utex; tp.utexminlod = extra.utexminlod;
+		tp.utexx = extra.utexx; tp.utexy = extra.utexy;
+		tcvr_m2_scene_poly(tv, tn, &tp);
+	}
+
 	switch (poly->num_vertices)
 	{
 	case 3: render_triangle<3>(vp, m_render_callbacks[renderer], poly->v[0], poly->v[1], poly->v[2]); break;
@@ -778,6 +828,14 @@ void model2_state::render_polygons(bitmap_rgb32 &bitmap, const rectangle &clipre
 	m_renderer->destmap().fill(0x00000000, cliprect);
 	m_renderer->fillmap().fill(0x00, cliprect);
 
+#if defined(__ANDROID__)
+	{
+		static bool armed = false;
+		if (!armed) { armed = true; if (tcvr_m2_record_requested()) tcvr_m2_scene_enable(1); }
+	}
+#endif
+	tcvr_m2_scene_begin(cliprect.width(), cliprect.height());
+
 	for (int window = raster->cur_window; window >= 0; window--)
 	{
 		/* go through the Z levels, and render each bucket */
@@ -804,6 +862,45 @@ void model2_state::render_polygons(bitmap_rgb32 &bitmap, const rectangle &clipre
 			}
 		}
 	}
+	{
+		// Publish the recorded walk. The colour chain is copied because the game
+		// rewrites it freely; the CPU raster reads the same tables per pixel.
+		tcvr_m2_frame fp{};
+		fp.width = cliprect.width();
+		fp.height = cliprect.height();
+		fp.palram = m_palram.get();       fp.palram_entries = 0x4000 / 2;
+		fp.colorxlat = m_colorxlat.get(); fp.colorxlat_entries = 0xc000 / 2;
+		fp.lumaram = m_lumaram.get();     fp.lumaram_entries = 0x8000;
+		fp.gamma = m_gamma_table;         fp.gamma_entries = 256;
+		tcvr_m2_scene_end(&fp);
+
+#if defined(__ANDROID__)
+		// The check that matters: the recorder must see the same number of
+		// polygons the rasteriser was handed. poly_list_index is the driver's
+		// own count for this frame, so a mismatch is reported, never smoothed.
+		if (tcvr_m2_scene_mode())
+		{
+			static unsigned count = 0;
+			static uint32_t prims = 0, verts = 0, dropped = 0, listed = 0;
+			if (const tcvr_m2_frame *published = tcvr_m2_acquire_scene())
+			{
+				prims += published->prim_count;
+				verts += published->vertex_count;
+				dropped += published->dropped_prims;
+			}
+			listed += raster->poly_list_index;
+			if (++count == 60)
+			{
+				__android_log_print(ANDROID_LOG_INFO, "TCVR_MODEL2",
+					"scene recorded avg prims=%.1f verts=%.1f dropped=%.2f | driver poly_list=%.1f over %u frames",
+					double(prims) / count, double(verts) / count, double(dropped) / count,
+					double(listed) / count, count);
+				count = 0; prims = verts = dropped = listed = 0;
+			}
+		}
+#endif
+	}
+
 #if defined(__ANDROID__)
 	const auto tcvr_wait_start = tcvr_profile ? tcvr_clock::now() : tcvr_clock::time_point{};
 #endif

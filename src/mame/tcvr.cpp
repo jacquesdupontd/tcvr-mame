@@ -1279,3 +1279,129 @@ extern "C" int tcvr_mame_scene_assets(tcvr_scene_assets *out)
 	*out = s_scene.assets;
 	return 1;
 }
+
+// ---------------------------------------------------------------------------
+// TCVR Model 2 scene recorder (see sega/tcvr_m2_scene.h).
+//
+// Same triple-buffered shape as the System 22 recorder above, and for the same
+// reason: the emulation thread must never block on a reader, and the XR thread
+// must never see a half-written frame. What differs is only what a Model 2
+// frame carries -- there is no czram, no Namco tile store, no sprite atlas;
+// the colour chain is palram, colorxlat, lumaram and a gamma ramp.
+//
+// This records; it does not decide. It publishes the same walk MAME's own
+// rasteriser makes, in the same painter's order, and reports what it had to
+// drop so a consumer can tell a complete scene from a truncated one instead of
+// trusting one.
+// ---------------------------------------------------------------------------
+#include "sega/tcvr_m2_scene.h"
+namespace {
+// A frame of Sega Rally attract runs 500-1800 polygons; the caps are set well
+// above what has been observed so that hitting one is a reportable anomaly
+// rather than normal operation. Exceeding them truncates the tail and says so.
+constexpr uint32_t k_m2_max_prims = 16384;
+constexpr uint32_t k_m2_max_vertices = 131072;
+
+struct tcvr_m2_scene_store
+{
+	struct slot
+	{
+		std::vector<tcvr_m2_vertex> vertices;
+		std::vector<tcvr_m2_prim> prims;
+		std::vector<uint16_t> palram;
+		std::vector<uint16_t> colorxlat;
+		std::vector<uint8_t> lumaram;
+		std::vector<uint8_t> gamma;
+		tcvr_m2_frame frame{};
+	};
+	std::mutex mutex;
+	slot slots[3];
+	int write_idx = 0, published_idx = 1, read_idx = 2;
+	bool fresh = false;
+	bool recording = false;
+	uint64_t sequence = 0;
+	uint32_t dropped_prims = 0, dropped_vertices = 0;
+	std::atomic<int> enabled{0};
+};
+tcvr_m2_scene_store s_m2_scene;
+}
+
+extern "C" void tcvr_m2_scene_enable(int mode)
+{
+	s_m2_scene.enabled.store(std::clamp(mode, 0, 1), std::memory_order_relaxed);
+}
+
+extern "C" int tcvr_m2_scene_mode(void)
+{
+	return s_m2_scene.enabled.load(std::memory_order_relaxed);
+}
+
+extern "C" void tcvr_m2_scene_begin(int width, int height)
+{
+	if (!s_m2_scene.enabled.load(std::memory_order_relaxed)) { s_m2_scene.recording = false; return; }
+	auto &w = s_m2_scene.slots[s_m2_scene.write_idx];
+	w.vertices.clear();
+	w.prims.clear();
+	w.frame.width = width;
+	w.frame.height = height;
+	s_m2_scene.dropped_prims = 0;
+	s_m2_scene.dropped_vertices = 0;
+	s_m2_scene.recording = true;
+}
+
+extern "C" void tcvr_m2_scene_poly(const tcvr_m2_vertex *v, int count, const tcvr_m2_prim *p)
+{
+	if (!s_m2_scene.recording || v == nullptr || p == nullptr || count < 3) return;
+	auto &w = s_m2_scene.slots[s_m2_scene.write_idx];
+	// A cap never rejects the frame: it drops the tail and records how much, so
+	// the number is visible instead of the scene silently disagreeing with the
+	// CPU raster.
+	if (w.prims.size() >= k_m2_max_prims || w.vertices.size() + count > k_m2_max_vertices)
+	{
+		s_m2_scene.dropped_prims++;
+		s_m2_scene.dropped_vertices += uint32_t(count);
+		return;
+	}
+	tcvr_m2_prim q = *p;
+	q.first_vertex = uint32_t(w.vertices.size());
+	q.vertex_count = uint32_t(count);
+	w.vertices.insert(w.vertices.end(), v, v + count);
+	w.prims.push_back(q);
+}
+
+extern "C" void tcvr_m2_scene_end(const tcvr_m2_frame *fp)
+{
+	if (!s_m2_scene.recording) return;
+	s_m2_scene.recording = false;
+	if (fp == nullptr) return;
+	auto &w = s_m2_scene.slots[s_m2_scene.write_idx];
+	if (fp->palram) w.palram.assign(fp->palram, fp->palram + fp->palram_entries); else w.palram.clear();
+	if (fp->colorxlat) w.colorxlat.assign(fp->colorxlat, fp->colorxlat + fp->colorxlat_entries); else w.colorxlat.clear();
+	if (fp->lumaram) w.lumaram.assign(fp->lumaram, fp->lumaram + fp->lumaram_entries); else w.lumaram.clear();
+	if (fp->gamma) w.gamma.assign(fp->gamma, fp->gamma + fp->gamma_entries); else w.gamma.clear();
+
+	w.frame = *fp;
+	w.frame.vertices = w.vertices.data();
+	w.frame.vertex_count = uint32_t(w.vertices.size());
+	w.frame.prims = w.prims.data();
+	w.frame.prim_count = uint32_t(w.prims.size());
+	w.frame.palram = w.palram.empty() ? nullptr : w.palram.data();
+	w.frame.colorxlat = w.colorxlat.empty() ? nullptr : w.colorxlat.data();
+	w.frame.lumaram = w.lumaram.empty() ? nullptr : w.lumaram.data();
+	w.frame.gamma = w.gamma.empty() ? nullptr : w.gamma.data();
+	w.frame.dropped_prims = s_m2_scene.dropped_prims;
+	w.frame.dropped_vertices = s_m2_scene.dropped_vertices;
+
+	std::lock_guard lock(s_m2_scene.mutex);
+	w.frame.sequence = ++s_m2_scene.sequence;
+	std::swap(s_m2_scene.write_idx, s_m2_scene.published_idx);
+	s_m2_scene.fresh = true;
+}
+
+extern "C" const tcvr_m2_frame *tcvr_m2_acquire_scene(void)
+{
+	std::lock_guard lock(s_m2_scene.mutex);
+	if (s_m2_scene.fresh) { std::swap(s_m2_scene.read_idx, s_m2_scene.published_idx); s_m2_scene.fresh = false; }
+	auto &r = s_m2_scene.slots[s_m2_scene.read_idx];
+	return r.frame.sequence ? &r.frame : nullptr;
+}
