@@ -82,6 +82,12 @@ struct tcvr_m2_frame
 	// marked since the last frame, so only what changed need go to the GPU.
 	// dirty_generation counts published frames: a consumer that missed one must
 	// re-upload everything rather than trust a stale mask.
+	// The System 24 layer that MAME draws OVER the polygons (tilemaps flagged
+	// priority, which on Sega Rally carries the HUD). A GPU pass that renders
+	// only the 3D would otherwise cover it. 0 means transparent, as in
+	// copybitmap_trans. These are ROM bitmaps: they gain nothing from being
+	// magnified, so a consumer should blit them nearest-neighbour.
+	const uint32_t *front2d; uint32_t front2d_stride;
 	const uint32_t *textureram[2]; uint32_t textureram_words;
 	const uint32_t *dirty[2];      uint32_t dirty_words, dirty_blocks, dirty_block_words;
 	uint64_t dirty_generation;

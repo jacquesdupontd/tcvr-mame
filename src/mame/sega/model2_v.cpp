@@ -862,92 +862,6 @@ void model2_state::render_polygons(bitmap_rgb32 &bitmap, const rectangle &clipre
 			}
 		}
 	}
-	{
-		// Publish the recorded walk. The colour chain is copied because the game
-		// rewrites it freely; the CPU raster reads the same tables per pixel.
-		tcvr_m2_frame fp{};
-		fp.width = cliprect.width();
-		fp.height = cliprect.height();
-		fp.palram = m_palram.get();       fp.palram_entries = 0x4000 / 2;
-		fp.colorxlat = m_colorxlat.get(); fp.colorxlat_entries = 0xc000 / 2;
-		fp.lumaram = m_lumaram.get();     fp.lumaram_entries = 0x8000;
-		fp.gamma = m_gamma_table;         fp.gamma_entries = 256;
-		// The sheets are handed over in place; only the dirty masks are copied.
-		fp.textureram[0] = m_textureram0;
-		fp.textureram[1] = m_textureram1;
-		fp.textureram_words = TCVR_TEX_BLOCKS * TCVR_TEX_BLOCK_WORDS;
-		fp.dirty[0] = m_tcvr_tex_dirty[0];
-		fp.dirty[1] = m_tcvr_tex_dirty[1];
-		fp.dirty_words = TCVR_TEX_BLOCKS / 32;
-		fp.dirty_blocks = TCVR_TEX_BLOCKS;
-		fp.dirty_block_words = TCVR_TEX_BLOCK_WORDS;
-		fp.dirty_generation = m_tcvr_tex_generation;
-		tcvr_m2_scene_end(&fp);
-
-#if defined(__ANDROID__)
-		if (tcvr_m2_scene_mode())
-		{
-			// Report what the texture sheets actually do, so the upload strategy
-			// is chosen on measurements rather than on a guess about them.
-			static unsigned count = 0;
-			static u64 writes = 0;
-			static unsigned blocks = 0, frames_touched = 0;
-			unsigned touched = 0;
-			for (int sheet = 0; sheet < 2; sheet++)
-				for (unsigned w2 = 0; w2 < TCVR_TEX_BLOCKS / 32; w2++)
-					touched += std::popcount(m_tcvr_tex_dirty[sheet][w2]);
-			// A running total that is NEVER reset: a per-frame average of zero
-			// cannot distinguish "the textures never change" from "this counter
-			// never fires", and the whole upload strategy hangs on knowing which.
-			static u64 total_writes = 0;
-			total_writes += m_tcvr_tex_writes[0] + m_tcvr_tex_writes[1];
-			writes += m_tcvr_tex_writes[0] + m_tcvr_tex_writes[1];
-			blocks += touched;
-			if (touched) frames_touched++;
-			if (++count == 60)
-			{
-				__android_log_print(ANDROID_LOG_INFO, "TCVR_MODEL2",
-					"texture RAM total writes=%llu | avg %.0f/frame dirty=%.1f blocks/frame (4KB each, %u max) frames touched=%u/%u",
-					(unsigned long long)total_writes,
-					double(writes) / count, double(blocks) / count, TCVR_TEX_BLOCKS * 2,
-					frames_touched, count);
-				count = 0; writes = 0; blocks = 0; frames_touched = 0;
-			}
-		}
-#endif
-		// Cleared only once the frame carrying it is published, so no write is
-		// lost between two frames.
-		std::memset(m_tcvr_tex_dirty, 0, sizeof(m_tcvr_tex_dirty));
-		m_tcvr_tex_writes[0] = m_tcvr_tex_writes[1] = 0;
-		m_tcvr_tex_generation++;
-
-#if defined(__ANDROID__)
-		// The check that matters: the recorder must see the same number of
-		// polygons the rasteriser was handed. poly_list_index is the driver's
-		// own count for this frame, so a mismatch is reported, never smoothed.
-		if (tcvr_m2_scene_mode())
-		{
-			static unsigned count = 0;
-			static uint32_t prims = 0, verts = 0, dropped = 0, listed = 0;
-			if (const tcvr_m2_frame *published = tcvr_m2_acquire_scene())
-			{
-				prims += published->prim_count;
-				verts += published->vertex_count;
-				dropped += published->dropped_prims;
-			}
-			listed += raster->poly_list_index;
-			if (++count == 60)
-			{
-				__android_log_print(ANDROID_LOG_INFO, "TCVR_MODEL2",
-					"scene recorded avg prims=%.1f verts=%.1f dropped=%.2f | driver poly_list=%.1f over %u frames",
-					double(prims) / count, double(verts) / count, double(dropped) / count,
-					double(listed) / count, count);
-				count = 0; prims = verts = dropped = listed = 0;
-			}
-		}
-#endif
-	}
-
 #if defined(__ANDROID__)
 	const auto tcvr_wait_start = tcvr_profile ? tcvr_clock::now() : tcvr_clock::time_point{};
 #endif
@@ -2648,6 +2562,102 @@ void model2_state::video_start()
 	save_pointer(NAME(m_gamma_table), 256);
 }
 
+
+// Publishes the recorded walk. Called at the very end of screen_update rather
+// than from render_polygons, because the System 24 layer that MAME draws OVER
+// the polygons does not exist yet at that point, and a consumer needs it in the
+// same frame or the HUD goes missing.
+void model2_state::tcvr_m2_publish_scene(const rectangle &cliprect)
+{
+	{
+		tcvr_m2_frame fp{};
+		fp.width = cliprect.width();
+		fp.height = cliprect.height();
+		fp.palram = m_palram.get();       fp.palram_entries = 0x4000 / 2;
+		fp.colorxlat = m_colorxlat.get(); fp.colorxlat_entries = 0xc000 / 2;
+		fp.lumaram = m_lumaram.get();     fp.lumaram_entries = 0x8000;
+		fp.gamma = m_gamma_table;         fp.gamma_entries = 256;
+		// The sheets are handed over in place; only the dirty masks are copied.
+		fp.textureram[0] = m_textureram0;
+		fp.textureram[1] = m_textureram1;
+		fp.textureram_words = TCVR_TEX_BLOCKS * TCVR_TEX_BLOCK_WORDS;
+		fp.dirty[0] = m_tcvr_tex_dirty[0];
+		fp.dirty[1] = m_tcvr_tex_dirty[1];
+		fp.dirty_words = TCVR_TEX_BLOCKS / 32;
+		fp.dirty_blocks = TCVR_TEX_BLOCKS;
+		fp.dirty_block_words = TCVR_TEX_BLOCK_WORDS;
+		fp.dirty_generation = m_tcvr_tex_generation;
+		// The priority tilemaps, as drawn over the polygons. bitmap_rgb32 rows
+		// are rowpixels() apart, not width.
+		fp.front2d = &m_sys24_bitmap.pix(0);
+		fp.front2d_stride = u32(m_sys24_bitmap.rowpixels());
+		tcvr_m2_scene_end(&fp);
+
+#if defined(__ANDROID__)
+		if (tcvr_m2_scene_mode())
+		{
+			// Report what the texture sheets actually do, so the upload strategy
+			// is chosen on measurements rather than on a guess about them.
+			static unsigned count = 0;
+			static u64 writes = 0;
+			static unsigned blocks = 0, frames_touched = 0;
+			unsigned touched = 0;
+			for (int sheet = 0; sheet < 2; sheet++)
+				for (unsigned w2 = 0; w2 < TCVR_TEX_BLOCKS / 32; w2++)
+					touched += std::popcount(m_tcvr_tex_dirty[sheet][w2]);
+			// A running total that is NEVER reset: a per-frame average of zero
+			// cannot distinguish "the textures never change" from "this counter
+			// never fires", and the whole upload strategy hangs on knowing which.
+			static u64 total_writes = 0;
+			total_writes += m_tcvr_tex_writes[0] + m_tcvr_tex_writes[1];
+			writes += m_tcvr_tex_writes[0] + m_tcvr_tex_writes[1];
+			blocks += touched;
+			if (touched) frames_touched++;
+			if (++count == 60)
+			{
+				__android_log_print(ANDROID_LOG_INFO, "TCVR_MODEL2",
+					"texture RAM total writes=%llu | avg %.0f/frame dirty=%.1f blocks/frame (4KB each, %u max) frames touched=%u/%u",
+					(unsigned long long)total_writes,
+					double(writes) / count, double(blocks) / count, TCVR_TEX_BLOCKS * 2,
+					frames_touched, count);
+				count = 0; writes = 0; blocks = 0; frames_touched = 0;
+			}
+		}
+#endif
+		// Cleared only once the frame carrying it is published, so no write is
+		// lost between two frames.
+		std::memset(m_tcvr_tex_dirty, 0, sizeof(m_tcvr_tex_dirty));
+		m_tcvr_tex_writes[0] = m_tcvr_tex_writes[1] = 0;
+		m_tcvr_tex_generation++;
+
+#if defined(__ANDROID__)
+		// The check that matters: the recorder must see the same number of
+		// polygons the rasteriser was handed. poly_list_index is the driver's
+		// own count for this frame, so a mismatch is reported, never smoothed.
+		if (tcvr_m2_scene_mode())
+		{
+			static unsigned count = 0;
+			static uint32_t prims = 0, verts = 0, dropped = 0, listed = 0;
+			if (const tcvr_m2_frame *published = tcvr_m2_acquire_scene())
+			{
+				prims += published->prim_count;
+				verts += published->vertex_count;
+				dropped += published->dropped_prims;
+			}
+			listed += m_raster->poly_list_index;
+			if (++count == 60)
+			{
+				__android_log_print(ANDROID_LOG_INFO, "TCVR_MODEL2",
+					"scene recorded avg prims=%.1f verts=%.1f dropped=%.2f | driver poly_list=%.1f over %u frames",
+					double(prims) / count, double(verts) / count, double(dropped) / count,
+					double(listed) / count, count);
+				count = 0; prims = verts = dropped = listed = 0;
+			}
+		}
+#endif
+	}
+}
+
 u32 model2_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, const rectangle &cliprect)
 {
 #if defined(__ANDROID__)
@@ -2695,6 +2705,10 @@ u32 model2_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, con
 		m_tiles->draw(screen, m_sys24_bitmap, cliprect, (layer<<1) | 1, 0, 0);
 
 	copybitmap_trans(bitmap, m_sys24_bitmap, 0, 0, 0, 0, cliprect, 0);
+
+	// m_sys24_bitmap now holds exactly the layer that goes over the polygons,
+	// so this is the only point where a complete scene can be published.
+	tcvr_m2_publish_scene(cliprect);
 
 #if defined(__ANDROID__)
 	if (tcvr_profile)

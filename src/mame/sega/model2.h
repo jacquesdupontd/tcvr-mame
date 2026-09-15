@@ -287,6 +287,7 @@ protected:
 	u32 m_tcvr_tex_dirty[2][TCVR_TEX_BLOCKS / 32]{};
 	u64 m_tcvr_tex_writes[2]{};
 	u64 m_tcvr_tex_generation = 0;
+	void tcvr_m2_publish_scene(const rectangle &cliprect);
 	void tcvr_tex_mark(unsigned sheet, offs_t word_index)
 	{
 		const unsigned block = unsigned(word_index / TCVR_TEX_BLOCK_WORDS);
