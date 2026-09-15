@@ -2635,27 +2635,26 @@ void model2_state::tcvr_m2_publish_scene(const rectangle &cliprect)
 		m_tcvr_tex_generation++;
 
 #if defined(__ANDROID__)
-		// The check that matters: the recorder must see the same number of
-		// polygons the rasteriser was handed. poly_list_index is the driver's
-		// own count for this frame, so a mismatch is reported, never smoothed.
+		// Count from the driver's own side only.
+		//
+		// This block used to call tcvr_m2_acquire_scene() to read back what had
+		// just been published. That was a real bug, not a cosmetic one:
+		// acquire() SWAPS the triple buffer's slots, and the render thread
+		// calls the same function. The two consumers stole scenes from each
+		// other, so the renderer got a stale frame roughly every other time --
+		// which looked like the picture shaking and half the geometry missing.
+		//
+		// A diagnostic must never consume what it observes.
 		if (tcvr_m2_scene_mode())
 		{
 			static unsigned count = 0;
-			static uint32_t prims = 0, verts = 0, dropped = 0, listed = 0;
-			if (const tcvr_m2_frame *published = tcvr_m2_acquire_scene())
-			{
-				prims += published->prim_count;
-				verts += published->vertex_count;
-				dropped += published->dropped_prims;
-			}
+			static uint32_t listed = 0;
 			listed += m_raster->poly_list_index;
 			if (++count == 60)
 			{
 				__android_log_print(ANDROID_LOG_INFO, "TCVR_MODEL2",
-					"scene recorded avg prims=%.1f verts=%.1f dropped=%.2f | driver poly_list=%.1f over %u frames",
-					double(prims) / count, double(verts) / count, double(dropped) / count,
-					double(listed) / count, count);
-				count = 0; prims = verts = dropped = listed = 0;
+					"driver poly_list avg=%.1f over %u frames", double(listed) / count, count);
+				count = 0; listed = 0;
 			}
 		}
 #endif
