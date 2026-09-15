@@ -96,6 +96,42 @@
 #include "model1io2.lh"
 #include "segabill.lh"
 
+#if defined(__ANDROID__)
+#include <android/log.h>
+#include <sys/system_properties.h>
+
+namespace {
+
+// The Sega Rally cabinet carries two Z80s that a headset port can never make
+// observable, and they are expensive here for a structural reason: the 500kHz
+// uart_clock fires ~1M timers a second, every timer forces a scheduler
+// timeslice, and every executing device is re-entered in each one. Measured on
+// Quest 3, the two of them take 2.80-2.83M of the 4.84-5.00M execute_run calls
+// per second (56-58%) and 346-402ms of CPU per second, out of a ~1000ms budget.
+//
+// Neither can reach the player:
+//  - the Versus City billboard is write-only (segabill.h exposes only write(),
+//    its outputs land in MAME's layout) and srallyc() below reassigns the very
+//    port that fed it, so nothing is even written to it any more;
+//  - the force-feedback drive board's only path back to the game,
+//    driveio_port_w(), is an empty body with MAME's own "TODO: hook up to the
+//    main CPU" -- and there is no force-feedback wheel on a headset anyway.
+//
+// So we hand them to set_disable(), which is MAME's own mechanism for a device
+// that must stay in the machine (its ROM is still audited) but must not run.
+// It survives resets because interface_pre_reset() re-applies it.
+// Set debug.tcvr.m2.cabinetCpus=1 to put them back for a control run.
+bool tcvr_cabinet_cpus_requested()
+{
+	// __system_property_get() returns 0 and leaves the buffer empty when the
+	// property is absent, so test the return value, never the buffer.
+	char value[PROP_VALUE_MAX] = {};
+	return __system_property_get("debug.tcvr.m2.cabinetCpus", value) > 0 && value[0] == '1';
+}
+
+}  // anonymous namespace
+#endif
+
 /* Timers - these count down at 25 MHz and pull IRQ2 when they hit 0 */
 u32 model2_state::timers_r(offs_t offset)
 {
@@ -2780,6 +2816,26 @@ void model2a_state::srallyc(machine_config &config)
 	io.an_port_callback<0>().set_ioport("STEER");
 	io.an_port_callback<1>().set_ioport("ACCEL");
 	io.an_port_callback<2>().set_ioport("BRAKE");
+
+#if defined(__ANDROID__)
+	// See tcvr_cabinet_cpus_requested() above for why these two are free.
+	if (!tcvr_cabinet_cpus_requested())
+	{
+		cpu_device *const billcpu(subdevice<cpu_device>("billboard:billcpu"));
+		if (billcpu != nullptr)
+			billcpu->set_disable();
+		m_drivecpu->set_disable();
+
+		__android_log_print(ANDROID_LOG_INFO, "TCVR_M2",
+				"cabinet CPUs disabled: billcpu=%s drivecpu=yes (debug.tcvr.m2.cabinetCpus=1 restores them)",
+				(billcpu != nullptr) ? "yes" : "NOT FOUND");
+	}
+	else
+	{
+		__android_log_print(ANDROID_LOG_INFO, "TCVR_M2",
+				"cabinet CPUs kept running: debug.tcvr.m2.cabinetCpus=1");
+	}
+#endif
 }
 
 void model2a_state::vcop2(machine_config &config)
