@@ -276,6 +276,26 @@ private:
 	// True while the raster workers are still finishing the previous frame.
 	// Only ever set on the deferred-join path (Android); see render_polygons().
 	bool m_tcvr_raster_inflight = false;
+
+protected:
+	// Texture RAM is RAM, not ROM: the game rewrites it, so a GPU backend
+	// cannot upload it once. Every write goes through tex0_w/tex1_w, so mark
+	// the 4 KB block it touched and let a consumer upload only those. 2 MB per
+	// sheet / 4 KB = 512 blocks, one bit each.
+	static constexpr unsigned TCVR_TEX_BLOCK_WORDS = 1024;   // 4 KB of u32
+	static constexpr unsigned TCVR_TEX_BLOCKS = 512;
+	u32 m_tcvr_tex_dirty[2][TCVR_TEX_BLOCKS / 32]{};
+	u64 m_tcvr_tex_writes[2]{};
+	u64 m_tcvr_tex_generation = 0;
+	void tcvr_tex_mark(unsigned sheet, offs_t word_index)
+	{
+		const unsigned block = unsigned(word_index / TCVR_TEX_BLOCK_WORDS);
+		if (block < TCVR_TEX_BLOCKS)
+			m_tcvr_tex_dirty[sheet][block >> 5] |= 1u << (block & 31);
+		m_tcvr_tex_writes[sheet]++;
+	}
+
+private:
 	int16_t m_crtc_xoffset = 0, m_crtc_yoffset = 0;
 	bool m_palette_dirty = false;
 

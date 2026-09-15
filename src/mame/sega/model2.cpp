@@ -1020,6 +1020,7 @@ void model2_tgp_state::tex0_w(offs_t offset, u32 data)
 		m_textureram0[offset>>1] &= 0x0000ffff;
 		m_textureram0[offset>>1] |= (data & 0xffff) << 16;
 	}
+	tcvr_tex_mark(0, offset >> 1);
 }
 
 void model2_tgp_state::tex1_w(offs_t offset, u32 data)
@@ -1034,6 +1035,7 @@ void model2_tgp_state::tex1_w(offs_t offset, u32 data)
 		m_textureram1[offset>>1] &= 0x0000ffff;
 		m_textureram1[offset>>1] |= (data & 0xffff) << 16;
 	}
+	tcvr_tex_mark(1, offset >> 1);
 }
 
 u8 model2_state::lumaram_r(offs_t offset)

@@ -872,7 +872,54 @@ void model2_state::render_polygons(bitmap_rgb32 &bitmap, const rectangle &clipre
 		fp.colorxlat = m_colorxlat.get(); fp.colorxlat_entries = 0xc000 / 2;
 		fp.lumaram = m_lumaram.get();     fp.lumaram_entries = 0x8000;
 		fp.gamma = m_gamma_table;         fp.gamma_entries = 256;
+		// The sheets are handed over in place; only the dirty masks are copied.
+		fp.textureram[0] = m_textureram0;
+		fp.textureram[1] = m_textureram1;
+		fp.textureram_words = TCVR_TEX_BLOCKS * TCVR_TEX_BLOCK_WORDS;
+		fp.dirty[0] = m_tcvr_tex_dirty[0];
+		fp.dirty[1] = m_tcvr_tex_dirty[1];
+		fp.dirty_words = TCVR_TEX_BLOCKS / 32;
+		fp.dirty_blocks = TCVR_TEX_BLOCKS;
+		fp.dirty_block_words = TCVR_TEX_BLOCK_WORDS;
+		fp.dirty_generation = m_tcvr_tex_generation;
 		tcvr_m2_scene_end(&fp);
+
+#if defined(__ANDROID__)
+		if (tcvr_m2_scene_mode())
+		{
+			// Report what the texture sheets actually do, so the upload strategy
+			// is chosen on measurements rather than on a guess about them.
+			static unsigned count = 0;
+			static u64 writes = 0;
+			static unsigned blocks = 0, frames_touched = 0;
+			unsigned touched = 0;
+			for (int sheet = 0; sheet < 2; sheet++)
+				for (unsigned w2 = 0; w2 < TCVR_TEX_BLOCKS / 32; w2++)
+					touched += std::popcount(m_tcvr_tex_dirty[sheet][w2]);
+			// A running total that is NEVER reset: a per-frame average of zero
+			// cannot distinguish "the textures never change" from "this counter
+			// never fires", and the whole upload strategy hangs on knowing which.
+			static u64 total_writes = 0;
+			total_writes += m_tcvr_tex_writes[0] + m_tcvr_tex_writes[1];
+			writes += m_tcvr_tex_writes[0] + m_tcvr_tex_writes[1];
+			blocks += touched;
+			if (touched) frames_touched++;
+			if (++count == 60)
+			{
+				__android_log_print(ANDROID_LOG_INFO, "TCVR_MODEL2",
+					"texture RAM total writes=%llu | avg %.0f/frame dirty=%.1f blocks/frame (4KB each, %u max) frames touched=%u/%u",
+					(unsigned long long)total_writes,
+					double(writes) / count, double(blocks) / count, TCVR_TEX_BLOCKS * 2,
+					frames_touched, count);
+				count = 0; writes = 0; blocks = 0; frames_touched = 0;
+			}
+		}
+#endif
+		// Cleared only once the frame carrying it is published, so no write is
+		// lost between two frames.
+		std::memset(m_tcvr_tex_dirty, 0, sizeof(m_tcvr_tex_dirty));
+		m_tcvr_tex_writes[0] = m_tcvr_tex_writes[1] = 0;
+		m_tcvr_tex_generation++;
 
 #if defined(__ANDROID__)
 		// The check that matters: the recorder must see the same number of

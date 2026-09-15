@@ -1312,6 +1312,7 @@ struct tcvr_m2_scene_store
 		std::vector<uint16_t> colorxlat;
 		std::vector<uint8_t> lumaram;
 		std::vector<uint8_t> gamma;
+		std::vector<uint32_t> dirty[2];
 		tcvr_m2_frame frame{};
 	};
 	std::mutex mutex;
@@ -1391,6 +1392,19 @@ extern "C" void tcvr_m2_scene_end(const tcvr_m2_frame *fp)
 	w.frame.gamma = w.gamma.empty() ? nullptr : w.gamma.data();
 	w.frame.dropped_prims = s_m2_scene.dropped_prims;
 	w.frame.dropped_vertices = s_m2_scene.dropped_vertices;
+	// The texture sheets are not copied: 4 MB a frame would cost more than the
+	// whole emulation. The driver owns them and only rewrites them through
+	// tex0_w/tex1_w, so a consumer reads them in place and uses the dirty mask
+	// to know what moved. The masks ARE copied, because the driver clears them
+	// as soon as this frame is published.
+	for (int sheet = 0; sheet < 2; sheet++)
+	{
+		if (fp->dirty[sheet] && fp->dirty_words)
+			w.dirty[sheet].assign(fp->dirty[sheet], fp->dirty[sheet] + fp->dirty_words);
+		else
+			w.dirty[sheet].clear();
+		w.frame.dirty[sheet] = w.dirty[sheet].empty() ? nullptr : w.dirty[sheet].data();
+	}
 
 	std::lock_guard lock(s_m2_scene.mutex);
 	w.frame.sequence = ++s_m2_scene.sequence;

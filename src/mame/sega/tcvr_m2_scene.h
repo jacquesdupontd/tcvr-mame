@@ -76,6 +76,15 @@ struct tcvr_m2_frame
 	const uint16_t *colorxlat; uint32_t colorxlat_entries;
 	const uint8_t  *lumaram;   uint32_t lumaram_entries;
 	const uint8_t  *gamma;     uint32_t gamma_entries;   // 256
+	// Texture RAM, the two sheets a primitive selects with tcvr_m2_prim::texsheet.
+	// It is RAM: the game rewrites it, so a consumer cannot upload it once.
+	// dirty[] carries one bit per 4 KB block (TCVR_TEX_BLOCKS blocks per sheet)
+	// marked since the last frame, so only what changed need go to the GPU.
+	// dirty_generation counts published frames: a consumer that missed one must
+	// re-upload everything rather than trust a stale mask.
+	const uint32_t *textureram[2]; uint32_t textureram_words;
+	const uint32_t *dirty[2];      uint32_t dirty_words, dirty_blocks, dirty_block_words;
+	uint64_t dirty_generation;
 	// How many primitives the recorder had to drop because a cap was hit. A
 	// scene is only comparable to the CPU raster when this reads zero.
 	uint32_t dropped_prims, dropped_vertices;
