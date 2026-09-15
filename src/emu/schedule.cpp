@@ -21,18 +21,29 @@ using tcvr_sched_clock = std::chrono::steady_clock;
 struct tcvr_timer_entry {
 	const char *name = nullptr;
 	unsigned samples = 0;
+	std::uint64_t nanoseconds = 0;
 };
 std::array<tcvr_timer_entry, 16> tcvr_timer_samples{};
 unsigned tcvr_timer_calls = 0;
 unsigned tcvr_timer_sample_counter = 0;
-void tcvr_timer_account(const char *name)
+bool tcvr_timer_sample(const char *name)
 {
 	++tcvr_timer_calls;
-	if ((++tcvr_timer_sample_counter & 1023u) != 0) return;
+	if ((++tcvr_timer_sample_counter & 1023u) != 0) return false;
 	for (auto &entry : tcvr_timer_samples) {
 		if (!entry.name || std::strcmp(entry.name, name) == 0) {
 			entry.name = name;
 			++entry.samples;
+			return true;
+		}
+	}
+	return false;
+}
+void tcvr_timer_account(const char *name, tcvr_sched_clock::time_point start)
+{
+	for (auto &entry : tcvr_timer_samples) {
+		if (entry.name && std::strcmp(entry.name, name) == 0) {
+			entry.nanoseconds += std::chrono::duration_cast<std::chrono::nanoseconds>(tcvr_sched_clock::now() - start).count();
 			return;
 		}
 	}
@@ -81,9 +92,11 @@ void tcvr_sched_account(running_machine &machine, device_execute_interface &devi
 		for (auto &entry : tcvr_timer_samples) {
 			if (entry.name && entry.samples) {
 				__android_log_print(ANDROID_LOG_INFO, "TCVR_SCHED",
-					"timer=%s sampled_calls=%u estimated_calls=%u",
-					entry.name, entry.samples, entry.samples * 1024u);
+					"timer=%s sampled_calls=%u estimated_calls=%u callback=%.3fms/s",
+					entry.name, entry.samples, entry.samples * 1024u,
+					double(entry.nanoseconds) / 1000000.0 * 1024.0);
 				entry.samples = 0;
+				entry.nanoseconds = 0;
 			}
 		}
 		__android_log_print(ANDROID_LOG_INFO, "TCVR_SCHED", "timer_total_calls=%u", tcvr_timer_calls);
@@ -1062,11 +1075,15 @@ inline void device_scheduler::execute_timers()
 			if (!timer.m_callback.isnull())
 			{
 				#if defined(__ANDROID__)
-				if (tcvr_sched_profile_enabled())
-					tcvr_timer_account(timer.m_callback.name());
+				const bool tcvr_timer_sampled = tcvr_sched_profile_enabled() && tcvr_timer_sample(timer.m_callback.name());
+				const auto tcvr_timer_start = tcvr_timer_sampled ? tcvr_sched_clock::now() : tcvr_sched_clock::time_point{};
 				#endif
 				LOG("execute_timers: timer callback %s\n", timer.m_callback.name());
 				timer.m_callback(timer.m_param);
+				#if defined(__ANDROID__)
+				if (tcvr_timer_sampled)
+					tcvr_timer_account(timer.m_callback.name(), tcvr_timer_start);
+				#endif
 			}
 		}
 
