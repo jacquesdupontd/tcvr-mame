@@ -63,6 +63,14 @@ struct tcvr_m2_prim
 	uint32_t texwidth, texheight, texx, texy;
 	uint32_t texwrapx, texwrapy, texmirrorx, texmirrory;
 	uint32_t utex, utexminlod, utexx, utexy;   // microtexture
+	// Projection centre for this primitive. model2_3d_project() is just two
+	// divisions by z around it:
+	//   x_screen = crtc_xoffset + center_x + x_eye / z
+	//   y_screen = (384 - center_y) + crtc_yoffset - y_eye / z
+	// which makes it INVERTIBLE -- and that is what a stereo pass needs, since
+	// the recorded vertices are already projected. Recovering eye space costs
+	// two multiplications per vertex and no extra emulation.
+	int32_t center_x, center_y;
 };
 
 struct tcvr_m2_frame
@@ -94,6 +102,8 @@ struct tcvr_m2_frame
 	// How many primitives the recorder had to drop because a cap was hit. A
 	// scene is only comparable to the CPU raster when this reads zero.
 	uint32_t dropped_prims, dropped_vertices;
+	// Screen offsets that go with tcvr_m2_prim::center_x/y.
+	int32_t crtc_xoffset, crtc_yoffset;
 };
 
 // Called by the driver, on the emulation thread.

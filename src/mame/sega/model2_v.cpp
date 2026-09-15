@@ -702,6 +702,8 @@ void model2_renderer::model2_3d_render(polygon *poly, const rectangle &cliprect)
 		tp.texmirrorx = extra.texmirrorx; tp.texmirrory = extra.texmirrory;
 		tp.utex = extra.utex; tp.utexminlod = extra.utexminlod;
 		tp.utexx = extra.utexx; tp.utexy = extra.utexy;
+		tp.center_x = poly->center[0];
+		tp.center_y = poly->center[1];
 		tcvr_m2_scene_poly(tv, tn, &tp);
 	}
 
@@ -2591,6 +2593,8 @@ void model2_state::tcvr_m2_publish_scene(const rectangle &cliprect)
 		// are rowpixels() apart, not width.
 		fp.front2d = &m_sys24_bitmap.pix(0);
 		fp.front2d_stride = u32(m_sys24_bitmap.rowpixels());
+		fp.crtc_xoffset = m_crtc_xoffset;
+		fp.crtc_yoffset = m_crtc_yoffset;
 		tcvr_m2_scene_end(&fp);
 
 #if defined(__ANDROID__)
