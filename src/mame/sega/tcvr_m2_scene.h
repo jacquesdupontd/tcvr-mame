@@ -134,6 +134,8 @@ struct tcvr_m2_frame
 	// while the game updated its HUD -- which is what made the game's menu
 	// flicker.
 	uint32_t geometry_unchanged;
+	double   emu_time;      // machine().time() : proves the emulation ADVANCES, not just publishes
+	uint32_t mame_frame;    // screen frame number
 	const tcvr_m2_raw_vertex *raw_vertices; uint32_t raw_vertex_count;   // pre-clip stream, submission order
 	const tcvr_m2_prim       *raw_prims;    uint32_t raw_prim_count;
 };

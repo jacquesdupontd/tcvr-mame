@@ -428,13 +428,17 @@ u16 model2_state::colorxlat_r(offs_t offset)
 	return m_colorxlat[offset];
 }
 
+unsigned long g_tcvr_rd_fifo=0, g_tcvr_rd_videoctl=0, g_tcvr_rd_coproctl=0, g_tcvr_rd_rendermode=0;
+u32 g_tcvr_vc_last=0xffffffff, g_tcvr_vc_changes=0;
 u32 model2_state::fifo_control_r()
 {
+	extern unsigned long g_tcvr_rd_fifo; ++g_tcvr_rd_fifo;
 	return m_copro_fifo_out->is_empty() ? 1 : 0;
 }
 
 u32 model2_state::videoctl_r()
 {
+	extern unsigned long g_tcvr_rd_videoctl; ++g_tcvr_rd_videoctl;
 	u8 framenum;
 
 	if(m_render_mode == false)
@@ -442,7 +446,11 @@ u32 model2_state::videoctl_r()
 	else
 		framenum = (m_framenum & 1) << 2;
 
-	return (framenum) | (m_videocontrol & 3);
+	const u32 vcv = (framenum) | (m_videocontrol & 3);
+#if defined(__ANDROID__)
+	{ extern u32 g_tcvr_vc_last, g_tcvr_vc_changes; if (vcv != g_tcvr_vc_last) { g_tcvr_vc_last = vcv; ++g_tcvr_vc_changes; } }
+#endif
+	return vcv;
 }
 
 void model2_state::videoctl_w(offs_t offset, u32 data, u32 mem_mask)
@@ -458,6 +466,7 @@ u32 model2_state::copro_prg_r()
 
 u32 model2_state::copro_ctl1_r()
 {
+	extern unsigned long g_tcvr_rd_coproctl; ++g_tcvr_rd_coproctl;
 	return m_coproctl;
 }
 
@@ -990,6 +999,7 @@ void model2_state::copro_w(offs_t offset, u32 data)
 
 u32 model2_state::render_mode_r()
 {
+	extern unsigned long g_tcvr_rd_rendermode; ++g_tcvr_rd_rendermode;
 	return (m_render_unk << 14) | (m_render_mode << 2) | (m_render_test_mode << 0);
 }
 
@@ -2474,6 +2484,21 @@ void model2_state::screen_vblank(int state)
 	}
 	if (m_m2comm)
 		m_m2comm->check_vint_irq();
+#if defined(__ANDROID__)
+	{
+		extern unsigned long g_tcvr_rd_fifo, g_tcvr_rd_videoctl, g_tcvr_rd_coproctl, g_tcvr_rd_rendermode;
+		static unsigned vbc = 0;
+		static unsigned vbfire = 0; ++vbfire;
+		if ((++vbc % 57u) == 0u) {
+			extern u32 g_tcvr_vc_changes;
+			__android_log_print(4, "TCVR_POLL",
+				"per57f: vblankFires=%u m_framenum=%u videoctlReads=%lu videoctlChanges=%u renderMode=%d",
+				vbfire, (unsigned)m_framenum, g_tcvr_rd_videoctl, g_tcvr_vc_changes, m_render_mode?1:0);
+			g_tcvr_rd_fifo = g_tcvr_rd_videoctl = g_tcvr_rd_coproctl = g_tcvr_rd_rendermode = 0;
+			g_tcvr_vc_changes = 0; vbfire = 0;
+		}
+	}
+#endif
 }
 
 void model2_state::sound_ready_w(int state)

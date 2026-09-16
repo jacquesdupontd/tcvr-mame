@@ -2619,6 +2619,15 @@ void model2_state::geo_parse()
 	u32  opcode;
 	u32  op_count = 0;
 	bool end_code = false;
+#if defined(__ANDROID__)
+	{
+		std::uint32_t h = 2166136261u;
+		for (int i = 0; i < 4096; ++i) { std::uint32_t w = m_bufferram[(address + i) & 0x7fff]; h = (h ^ w) * 16777619u; }
+		static unsigned gpc = 0;
+		if ((gpc++ % 57u) == 0u)
+			__android_log_print(4, "TCVR_GEOIN", "geo_parse in: readAddr=%08x listHash=%08x", m_geo_read_start_address, h);
+	}
+#endif
 
 	// reset raster frame variables
 	render_frame_start();
@@ -2735,6 +2744,8 @@ void model2_state::tcvr_m2_publish_scene(const rectangle &cliprect)
 		fp.crtc_xoffset = m_crtc_xoffset;
 		fp.crtc_yoffset = m_crtc_yoffset;
 		fp.geometry_unchanged = m_tcvr_scene_geometry_unchanged ? 1u : 0u;
+		fp.emu_time = machine().time().as_double();
+		fp.mame_frame = m_screen->frame_number();
 		tcvr_m2_scene_end(&fp);
 
 #if defined(__ANDROID__)
