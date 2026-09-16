@@ -276,6 +276,7 @@ private:
 	// True while the raster workers are still finishing the previous frame.
 	// Only ever set on the deferred-join path (Android); see render_polygons().
 	bool m_tcvr_raster_inflight = false;
+	float m_tcvr_focus_x = 0.0f, m_tcvr_focus_y = 0.0f;
 
 protected:
 	// Texture RAM is RAM, not ROM: the game rewrites it, so a GPU backend

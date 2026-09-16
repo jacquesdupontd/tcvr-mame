@@ -2698,7 +2698,15 @@ void model2_state::tcvr_m2_publish_scene(const rectangle &cliprect)
 		fp.colorxlat = m_colorxlat.get(); fp.colorxlat_entries = 0xc000 / 2;
 		fp.lumaram = m_lumaram.get();     fp.lumaram_entries = 0x8000;
 		fp.gamma = m_gamma_table;         fp.gamma_entries = 256;
-		fp.focus_x = m_geo ? m_geo->focus.x : 0.0f; fp.focus_y = m_geo ? m_geo->focus.y : 0.0f;
+		// The geometry engine's focus is programmed by a GEO opcode and read
+		// here at video time. In scene-recording mode the two schedules line up
+		// such that focus reads 0 on most frames (measured 47/49), which froze
+		// the immersive consumer. Focus is a slowly changing camera parameter, so
+		// publish the last non-zero one.
+		if (m_geo && m_geo->focus.x > 1.0f && m_geo->focus.y > 1.0f) {
+			m_tcvr_focus_x = m_geo->focus.x; m_tcvr_focus_y = m_geo->focus.y;
+		}
+		fp.focus_x = m_tcvr_focus_x; fp.focus_y = m_tcvr_focus_y;
 		// The sheets are handed over in place; only the dirty masks are copied.
 		fp.textureram[0] = m_textureram0;
 		fp.textureram[1] = m_textureram1;
