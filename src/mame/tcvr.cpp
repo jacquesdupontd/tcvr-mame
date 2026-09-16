@@ -460,6 +460,26 @@ private:
 				steer = s_input.steer; gas = s_input.gas; brake = s_input.brake;
 				shift_up = s_input.shift_up; shift_down = s_input.shift_down; view = s_input.view;
 			}
+			// Autonomous input injection (16/09): debug.tcvr.in.* override the live
+			// controller so the bench can drive the game headless (coin, start,
+			// steer, gas...). Unset props leave the controller value untouched.
+			{
+				char v[PROP_VALUE_MAX];
+				auto pb = [&](char const *k, bool &out){ if (__system_property_get(k, v) > 0) out = (v[0] == '1'); };
+				auto pf = [&](char const *k, float &out){ if (__system_property_get(k, v) > 0) out = float(atof(v)); };
+				pb("debug.tcvr.in.coin", coin);
+				pb("debug.tcvr.in.start", start);
+				pb("debug.tcvr.in.view", view);
+				pb("debug.tcvr.in.trigger", trigger);
+				pb("debug.tcvr.in.pedal", pedal);
+				pb("debug.tcvr.in.shiftup", shift_up);
+				pb("debug.tcvr.in.shiftdown", shift_down);
+				pf("debug.tcvr.in.steer", steer);
+				pf("debug.tcvr.in.gas", gas);
+				pf("debug.tcvr.in.brake", brake);
+				pf("debug.tcvr.in.gunx", gun_x);
+				pf("debug.tcvr.in.guny", gun_y);
+			}
 			ioport_list const &ports = m_machine->ioport().ports();
 			auto find_port = [&ports](char const *tag) -> ioport_port *
 			{
