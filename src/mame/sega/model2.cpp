@@ -430,6 +430,7 @@ u16 model2_state::colorxlat_r(offs_t offset)
 
 unsigned long g_tcvr_rd_fifo=0, g_tcvr_rd_videoctl=0, g_tcvr_rd_coproctl=0, g_tcvr_rd_rendermode=0;
 u32 g_tcvr_vc_last=0xffffffff, g_tcvr_vc_changes=0;
+unsigned long g_tcvr_copro_push=0, g_tcvr_copro_pop=0;
 u32 model2_state::fifo_control_r()
 {
 	extern unsigned long g_tcvr_rd_fifo; ++g_tcvr_rd_fifo;
@@ -646,7 +647,9 @@ void model2_tgp_state::copro_function_port_w(offs_t offset, u32 data)
 	u32 d = data & 0x800fffff;
 	u32 a = (offset >> 2) & 0xff;
 	d |= a << 23;
-
+#if defined(__ANDROID__)
+	{ extern unsigned long g_tcvr_copro_pop; ++g_tcvr_copro_pop; }
+#endif
 	m_copro_fifo_in->push(u32(d));
 }
 
@@ -663,6 +666,9 @@ void model2_tgp_state::copro_boot()
 
 u32 model2_tgp_state::copro_fifo_r()
 {
+#if defined(__ANDROID__)
+	{ extern unsigned long g_tcvr_copro_push; ++g_tcvr_copro_push; }
+#endif
 	return m_copro_fifo_out->pop();
 }
 
@@ -688,6 +694,9 @@ u32 model2b_state::copro_sharc_buffer_r(offs_t offset)
 
 void model2b_state::copro_sharc_buffer_w(offs_t offset, u32 data)
 {
+#if defined(__ANDROID__)
+	{ extern unsigned long g_tcvr_copro_push; ++g_tcvr_copro_push; }
+#endif
 	m_bufferram[offset & 0x7fff] = data;
 }
 
@@ -710,6 +719,9 @@ void model2b_state::copro_boot()
 
 u32 model2b_state::copro_fifo_r()
 {
+#if defined(__ANDROID__)
+	{ extern unsigned long g_tcvr_copro_pop; ++g_tcvr_copro_pop; }
+#endif
 	return m_copro_fifo_out->pop();
 }
 
@@ -717,11 +729,17 @@ void model2b_state::copro_fifo_w(u32 data)
 {
 	if (m_coproctl & 0x80000000)
 	{
+#if defined(__ANDROID__)
+		{ extern unsigned long g_tcvr_copro_pop; ++g_tcvr_copro_pop; }
+#endif
 		m_copro_adsp->external_dma_write(m_coprocnt, data & 0xffff);
 		m_coprocnt++;
 	}
 	else
 	{
+#if defined(__ANDROID__)
+		{ extern unsigned long g_tcvr_copro_push; ++g_tcvr_copro_push; }
+#endif
 		m_copro_fifo_in->push(u32(data));
 	}
 }
@@ -2491,11 +2509,12 @@ void model2_state::screen_vblank(int state)
 		static unsigned vbfire = 0; ++vbfire;
 		if ((++vbc % 57u) == 0u) {
 			extern u32 g_tcvr_vc_changes;
+			extern unsigned long g_tcvr_copro_push, g_tcvr_copro_pop;
 			__android_log_print(4, "TCVR_POLL",
-				"per57f: vblankFires=%u m_framenum=%u videoctlReads=%lu videoctlChanges=%u renderMode=%d",
-				vbfire, (unsigned)m_framenum, g_tcvr_rd_videoctl, g_tcvr_vc_changes, m_render_mode?1:0);
+				"per57f: vblankFires=%u m_framenum=%u videoctlChanges=%u renderMode=%d tgpResultReads=%lu gameToTgp=%lu",
+				vbfire, (unsigned)m_framenum, g_tcvr_vc_changes, m_render_mode?1:0, g_tcvr_copro_push, g_tcvr_copro_pop);
 			g_tcvr_rd_fifo = g_tcvr_rd_videoctl = g_tcvr_rd_coproctl = g_tcvr_rd_rendermode = 0;
-			g_tcvr_vc_changes = 0; vbfire = 0;
+			g_tcvr_vc_changes = 0; vbfire = 0; g_tcvr_copro_push = g_tcvr_copro_pop = 0;
 		}
 	}
 #endif
