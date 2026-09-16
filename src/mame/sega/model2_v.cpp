@@ -939,21 +939,30 @@ void model2_state::render_polygons(bitmap_rgb32 &bitmap, const rectangle &clipre
 	// destmap stays as it was cleared above: in this mode nothing reads it. The
 	// 2D layers are untouched, being produced by screen_update either side of
 	// this call.
+	// TCVR mode 2 -- EXPERIMENT 16/09 (colleague's lead): keep the whole frame
+	// lifecycle, remove ONLY the pixel rasteriser. Bypassing the entire function
+	// (the previous behaviour) starved the geometry producer after a few frames:
+	// poly_list_index went to 0 and the scene published EMPTY (measured
+	// empty=60), which froze the image. The traversal, the projection and above
+	// all the worker join m_renderer->wait() -- which recycles the poly_manager
+	// object pool -- are all part of that lifecycle. We keep them; only
+	// model2_3d_render (texture decode + software raster, the CPU cost) is cut.
 	if (tcvr_m2_scene_mode() >= 2)
 	{
-		// m_render_done is deliberately NOT set here, and that single line was
-		// the cause of the frozen picture.
-		//
-		// destmap has just been cleared above. Setting m_render_done would tell
-		// MAME "this frame is already rasterised", so the NEXT call takes the
-		// reuse path at the top of this function and copies that EMPTY destmap
-		// -- and it keeps doing so, including after the consumer drops back to
-		// mode 1, because nothing ever clears the flag on that path. The
-		// emulation and the sound carried on while the image stayed glued.
-		//
-		// Leaving it false costs nothing in this mode (the reuse path only
-		// avoids work we are skipping anyway) and means that the moment mode 1
-		// returns, MAME rasterises a fresh frame.
+		for (int window = raster->cur_window; window >= 0; window--)
+			for (z = raster->min_z; z <= raster->max_z; z++)
+				if (raster->poly_sorted_list[z] != nullptr)
+				{
+					polygon *poly = raster->poly_sorted_list[z];
+					while (poly != nullptr)
+					{
+						if (poly->window == window)
+							model2_3d_project(poly);   // keep state; skip model2_3d_render
+						poly = (polygon *)poly->next;
+					}
+				}
+		m_renderer->wait("End of frame (mode 2 lifecycle)");
+		m_render_done = true;   // safe: render_frame_start clears it every geo_parse (vblank)
 		return;
 	}
 
