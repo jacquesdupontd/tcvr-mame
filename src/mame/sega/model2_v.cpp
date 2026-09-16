@@ -941,7 +941,19 @@ void model2_state::render_polygons(bitmap_rgb32 &bitmap, const rectangle &clipre
 	// this call.
 	if (tcvr_m2_scene_mode() >= 2)
 	{
-		m_render_done = true;
+		// m_render_done is deliberately NOT set here, and that single line was
+		// the cause of the frozen picture.
+		//
+		// destmap has just been cleared above. Setting m_render_done would tell
+		// MAME "this frame is already rasterised", so the NEXT call takes the
+		// reuse path at the top of this function and copies that EMPTY destmap
+		// -- and it keeps doing so, including after the consumer drops back to
+		// mode 1, because nothing ever clears the flag on that path. The
+		// emulation and the sound carried on while the image stayed glued.
+		//
+		// Leaving it false costs nothing in this mode (the reuse path only
+		// avoids work we are skipping anyway) and means that the moment mode 1
+		// returns, MAME rasterises a fresh frame.
 		return;
 	}
 
