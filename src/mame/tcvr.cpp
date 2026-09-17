@@ -465,8 +465,8 @@ private:
 			// steer, gas...). Unset props leave the controller value untouched.
 			{
 				char v[PROP_VALUE_MAX];
-				auto pb = [&](char const *k, bool &out){ if (__system_property_get(k, v) > 0) out = (v[0] == '1'); };
-				auto pf = [&](char const *k, float &out){ if (__system_property_get(k, v) > 0) out = float(atof(v)); };
+				auto pb = [&](char const *k, bool &out){ if (__system_property_get(k, v) > 0 && v[0] != '\0' && v[0] != '"') out = (v[0] == '1'); };
+				auto pf = [&](char const *k, float &out){ if (__system_property_get(k, v) > 0 && v[0] != '\0' && v[0] != '"') out = float(atof(v)); };
 				pb("debug.tcvr.in.coin", coin);
 				pb("debug.tcvr.in.start", start);
 				pb("debug.tcvr.in.view", view);
