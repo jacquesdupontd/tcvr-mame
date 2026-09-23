@@ -340,7 +340,15 @@ attotime z80ctc_channel_device::period() const
 
 	// compute the period
 	attotime period = m_device->clocks_to_attotime((m_mode & PRESCALER) == PRESCALER_16 ? 16 : 256);
-	return period * m_tconst;
+	return period * m_tconst * u32(batch());
+}
+
+// TCVR: pulses emitted per timer event (1 unless the owner opted in and this channel does not interrupt).
+int z80ctc_channel_device::batch() const
+{
+	if (!m_device->m_zc_instant_pulse || m_device->m_zc_batch <= 1) return 1;
+	if ((m_mode & INTERRUPT) == INTERRUPT_ON) return 1;
+	return m_device->m_zc_batch;
 }
 
 
@@ -553,7 +561,10 @@ TIMER_CALLBACK_MEMBER(z80ctc_channel_device::timer_callback)
 	// generate the clock pulse
 	m_device->m_zc_cb[m_index](1);
 	if (m_device->m_zc_instant_pulse)
+	{
 		m_device->m_zc_cb[m_index](0);
+		for (int extra = batch(); extra > 1; extra--) { m_device->m_zc_cb[m_index](1); m_device->m_zc_cb[m_index](0); }
+	}
 	else
 		m_zc_to_timer->adjust(m_device->clocks_to_attotime(1));
 

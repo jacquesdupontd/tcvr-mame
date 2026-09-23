@@ -58,6 +58,7 @@ protected:
 	void write(u8 data);
 
 	attotime period() const;
+	int batch() const;
 	void trigger(bool state);
 	TIMER_CALLBACK_MEMBER(timer_callback);
 	TIMER_CALLBACK_MEMBER(zc_to_callback);
@@ -89,6 +90,9 @@ public:
 	// TCVR: emit the ZC/TO pulse as both edges at once instead of a timer for the falling edge. Same edge
 	// count for edge-clocked consumers (SIO baud clocks), half the timer events. Opt-in per board.
 	void set_zc_instant_pulse(bool instant) { m_zc_instant_pulse = instant; }
+	// TCVR: with instant pulses, a channel WITHOUT interrupts fires once every `batch` counts and emits `batch`
+	// pulses at once (an unconnected SIO baud clock: 16 pulses = one bit). Interrupting channels are untouched.
+	void set_zc_batch(int batch) { m_zc_batch = batch < 1 ? 1 : batch; }
 	template <int Channel> void set_clk(u32 clock) { channel_config(Channel).set_clock(clock); }
 	template <int Channel> void set_clk(const XTAL &xtal) { channel_config(Channel).set_clock(xtal); }
 
@@ -127,6 +131,7 @@ protected:
 	devcb_write_line                                m_intr_cb;  // interrupt callback
 	devcb_write_line::array<4>                      m_zc_cb;    // zero crossing/timer output callbacks
 	bool                                            m_zc_instant_pulse = false;
+	int                                             m_zc_batch = 1;
 
 	u8                                              m_vector;   // interrupt vector
 };

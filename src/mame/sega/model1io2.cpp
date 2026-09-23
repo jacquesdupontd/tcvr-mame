@@ -154,6 +154,13 @@ void model1io2_device::device_add_mconfig(machine_config &config)
 		if (__system_property_get("debug.tcvr.m2.ctcInstant", value) > 0 && value[0] == '0') instant = false;
 #endif
 		iocpu.set_ctc_zc_instant_pulse(instant);
+		// ... and 16 pulses per event on the non-interrupting channels (the SIO baud clocks): Virtua Cop in play
+		// still took ~640k CTC events a second, and its music wobbled as the emulation speed did (23/09).
+		int batch = 16;
+#if defined(__ANDROID__)
+		if (__system_property_get("debug.tcvr.m2.ctcBatch", value) > 0 && value[0] >= '0' && value[0] <= '9') batch = atoi(value);
+#endif
+		iocpu.set_ctc_zc_batch(instant ? batch : 1);
 	}
 
 	// SIO channel a baud rate adjusted by dsw1 1+2: 38400, 19200, 9600, 4800
