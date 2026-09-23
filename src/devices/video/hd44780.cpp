@@ -141,7 +141,7 @@ ROM_START( hd44780 )
 	ROM_SYSTEM_BIOS(0, "a00", "A00")
 
 	ROM_REGION( 0x1000, "cgrom", 0 )
-	ROMX_LOAD( "hd44780_a00.bin",    0x0000, 0x1000,  BAD_DUMP CRC(e459877c) SHA1(65cf075a988cdcbb316b9afdd0529b374a1a65ec), ROM_BIOS(0)) // from page 97 of the 1985 HD44780 datasheet from crystalfontz
+	ROMX_LOAD( "hd44780_a00.bin",    0x0000, 0x1000,  BAD_DUMP CRC(e459877c) SHA1(65cf075a988cdcbb316b9afdd0529b374a1a65ec), ROM_BIOS(0) | ROM_OPTIONAL) // TCVR: optional, LCD font of I/O boards, never shown. From page 97 of the 1985 HD44780 datasheet from crystalfontz
 ROM_END
 
 ROM_START( hd44780u )

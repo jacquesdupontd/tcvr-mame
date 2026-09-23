@@ -22,6 +22,7 @@
 #include <atomic>
 #include <chrono>
 #include <mutex>
+#include <sstream>
 #include <vector>
 
 namespace {
@@ -167,6 +168,15 @@ struct tcvr_input_store
 
 tcvr_input_store s_input;
 
+// The machine's own screen. Some boards bring a second one (the model1io2 I/O
+// board of Virtua Cop has a small LCD), and device-tree order can put it first.
+static screen_device *tcvr_main_screen(device_t &root)
+{
+	if (screen_device *main = root.subdevice<screen_device>("screen"))
+		return main;
+	return screen_device_enumerator(root).first();
+}
+
 class tcvr_osd final : public osd_interface
 {
 public:
@@ -175,7 +185,7 @@ public:
 	{
 		if (!m_machine)
 			return;
-		screen_device *screen = screen_device_enumerator(m_machine->root_device()).first();
+		screen_device *screen = tcvr_main_screen(m_machine->root_device());
 		if (!screen || screen->renderbitmap().format() != BITMAP_FORMAT_RGB32)
 			return;
 
@@ -410,7 +420,7 @@ public:
 		// in the audio reader can conjure the missing block.
 		m_render_target = machine.render().target_alloc();
 		const bool alwaysUpdate = property_flag("debug.tcvr.alwaysUpdate", false);
-		if (screen_device *screen = screen_device_enumerator(machine.root_device()).first())
+		if (screen_device *screen = tcvr_main_screen(machine.root_device()))
 		{
 			if (alwaysUpdate)
 				screen->set_video_attributes(VIDEO_ALWAYS_UPDATE);
@@ -531,7 +541,7 @@ private:
 				set_button("INPUTS", 0x0020, shift_up);
 				set_button("INPUTS", 0x0040, shift_down);
 			}
-			else
+			else if (find_port("OPT.0"))
 			{
 			set_button("INPUTS", 0x0001, coin);
 				set_button("INPUTS", 0x0010, trigger);
@@ -539,6 +549,31 @@ private:
 				set_axis("OPT.0", gun_x);
 				set_axis("OPT.1", gun_y);
 				set_button("INPUTS", 0x0100, start);
+			}
+			else
+			{
+				// Any other game (23/09, Virtua Cop first): wired by what MAME says each field IS, not by
+				// port names. Player 1 only: coin, start, button 1 = trigger, button 2 = pedal, light gun
+				// X/Y = aim (offscreen sends 0 = the field's minimum, where these games reload).
+				for (auto const &port : ports)
+					for (ioport_field &field : port.second->fields())
+					{
+						if (field.player() != 0) continue;
+						auto axis = [&field](float n) {
+							ioport_value const range = field.maxval() - field.minval();
+							field.set_value(field.minval() + ioport_value(std::clamp(n, 0.0f, 1.0f) * float(range)));
+						};
+						switch (field.type())
+						{
+						case IPT_COIN1:       field.set_value(coin ? 1 : 0); break;
+						case IPT_START1:      field.set_value(start ? 1 : 0); break;
+						case IPT_BUTTON1:     field.set_value(trigger ? 1 : 0); break;
+						case IPT_BUTTON2:     field.set_value(pedal ? 1 : 0); break;
+						case IPT_LIGHTGUN_X:  axis(gun_x); break;
+						case IPT_LIGHTGUN_Y:  axis(gun_y); break;
+						default: break;
+						}
+					}
 			}
 			if (!m_inputLogged || coin != m_lastCoin || start != m_lastStart || trigger != m_lastTrigger || pedal != m_lastPedal)
 			{
@@ -645,8 +680,34 @@ extern "C" void tcvr_mame_request_exit()
 // is a test-only bound; zero is the normal continuous arcade runtime. The ROM
 // archive remains at a caller-owned external path and is never copied into the
 // application or this repository.
+// MAME's own error and warning messages (missing ROM files with their names, bad CRCs, unsupported features...)
+// were printed to stderr, which Android drops: a game that did not boot said only "result=2". Forward them to
+// logcat so the reason is readable (scripts/port_game.py reads these lines).
+namespace {
+class tcvr_log_output : public osd_output
+{
+public:
+	void output_callback(osd_output_channel channel, util::format_argument_pack<char> const &args) override
+	{
+		if (channel == OSD_OUTPUT_CHANNEL_ERROR || channel == OSD_OUTPUT_CHANNEL_WARNING)
+		{
+			std::ostringstream text;
+			util::stream_format(text, args);
+			std::string line = text.str();
+			while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+			if (!line.empty())
+				__android_log_print(channel == OSD_OUTPUT_CHANNEL_ERROR ? ANDROID_LOG_ERROR : ANDROID_LOG_WARN, "TCVR_MAME", "MAME: %s", line.c_str());
+		}
+		chain_output(channel, args);
+	}
+};
+tcvr_log_output s_tcvr_log_output;
+std::once_flag s_tcvr_log_once;
+}
+
 extern "C" int tcvr_mame_boot_smoke(const char *driver_id, const char *rom_path, int seconds, int *frame_count)
 {
+	std::call_once(s_tcvr_log_once, [] { osd_output::push(&s_tcvr_log_output); });
 	if (!driver_id || !rom_path || seconds < 0 || !frame_count)
 		return EMU_ERR_INVALID_CONFIG;
 
