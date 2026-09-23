@@ -14,6 +14,7 @@
 
 #include <android/log.h>
 
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <sys/system_properties.h>
@@ -601,6 +602,38 @@ extern "C" int tcvr_mame_core_abi_version()
 extern "C" int tcvr_mame_has_driver(const char *driver_id)
 {
 	return driver_id && driver_list::find(driver_id) >= 0;
+}
+
+// What the app needs to know about a game, asked to MAME instead of listed in the app (23/09): the board is
+// the driver's source file (namco/namcos22.cpp, sega/model2.cpp...), known before running; the title is the
+// driver's full name. Returns 0 when MAME has no such driver (a BIOS or device ROM set, e.g. namcoc71).
+extern "C" int tcvr_mame_driver_info(const char *driver_id, char *source, int source_cap, char *title, int title_cap)
+{
+	if (!driver_id) return 0;
+	int const index = driver_list::find(driver_id);
+	if (index < 0) return 0;
+	game_driver const &driver = driver_list::driver(index);
+	if (source && source_cap > 0) std::snprintf(source, size_t(source_cap), "%s", driver.type.source() ? driver.type.source() : "");
+	if (title && title_cap > 0) std::snprintf(title, size_t(title_cap), "%s", driver.type.fullname() ? driver.type.fullname() : "");
+	return 1;
+}
+
+// Controls of the RUNNING game, read from its input ports: bit 0 = steering / pedals (paddle, pedal, analog
+// stick), bit 1 = light gun. -1 while no machine is running.
+extern "C" int tcvr_mame_input_traits()
+{
+	running_machine *machine = s_tcvr_machine.load();
+	if (!machine) return -1;
+	int traits = 0;
+	for (auto const &port : machine->ioport().ports())
+		for (ioport_field const &field : port.second->fields())
+			switch (field.type())
+			{
+			case IPT_PADDLE: case IPT_PADDLE_V: case IPT_PEDAL: case IPT_PEDAL2: case IPT_PEDAL3: case IPT_AD_STICK_X: traits |= 1; break;
+			case IPT_LIGHTGUN_X: case IPT_LIGHTGUN_Y: traits |= 2; break;
+			default: break;
+			}
+	return traits;
 }
 
 extern "C" void tcvr_mame_request_exit()
