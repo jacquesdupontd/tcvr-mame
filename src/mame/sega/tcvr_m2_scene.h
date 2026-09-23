@@ -81,6 +81,9 @@ struct tcvr_m2_prim
 	// two multiplications per vertex and no extra emulation.
 	int32_t center_x, center_y;
 	uint32_t zsort;                         // board z bucket (float_to_zval): its draw order, near to far
+	// Direct colour (Sega Model 1, 23/09): bit 24 set = untextured polygon whose final, already lit colour is
+	// 0xRRGGBB in the low bits. The palette / luma chain above is then unused. 0 on Model 2.
+	uint32_t rgb;
 };
 
 struct tcvr_m2_frame
@@ -151,6 +154,9 @@ void tcvr_m2_scene_begin(int width, int height);
 void tcvr_m2_scene_poly(const tcvr_m2_vertex *v, int count, const tcvr_m2_prim *p);
 void tcvr_m2_scene_raw_poly(const tcvr_m2_raw_vertex *v, int count, const tcvr_m2_prim *p);
 void tcvr_m2_scene_raw_reset(void);   // the board starts a new display list (render_frame_start)
+// The pending raw list is complete, even if EMPTY: the next begin() takes it (Model 1 records the whole list
+// at the end of the frame; an empty list must replace the previous 3D, not keep it).
+void tcvr_m2_scene_raw_commit(void);
 // The driver fills in width/height and the colour-chain pointers; the
 // recorder copies those tables (about 98 KB) and owns the copies.
 void tcvr_m2_scene_end(const tcvr_m2_frame *frame_params);

@@ -555,10 +555,22 @@ private:
 				// Any other game (23/09, Virtua Cop first): wired by what MAME says each field IS, not by
 				// port names. Player 1 only: coin, start, button 1 = trigger, button 2 = pedal, light gun
 				// X/Y = aim (offscreen sends 0 = the field's minimum, where these games reload).
+				// Camera buttons (Virtua Racing's VR1..VR4): each press of "view" selects the next one.
+				int vrCount = 0;
+				for (auto const &port : ports)
+					for (ioport_field &field : port.second->fields())
+						if (field.name().rfind("VR", 0) == 0) ++vrCount;
+				if (view && !m_lastViewGeneric && vrCount > 0) m_vrIndex = (m_vrIndex + 1) % vrCount;
+				m_lastViewGeneric = view;
+				int vrSeen = 0;
 				for (auto const &port : ports)
 					for (ioport_field &field : port.second->fields())
 					{
 						if (field.player() != 0) continue;
+						std::string const &fname = field.name();
+						if (fname.rfind("VR", 0) == 0) { field.set_value((view && vrSeen == m_vrIndex) ? 1 : 0); ++vrSeen; continue; }
+						if (fname == "Shift Up")   { field.set_value(shift_up ? 1 : 0); continue; }
+						if (fname == "Shift Down") { field.set_value(shift_down ? 1 : 0); continue; }
 						auto axis = [&field](float n) {
 							ioport_value const range = field.maxval() - field.minval();
 							field.set_value(field.minval() + ioport_value(std::clamp(n, 0.0f, 1.0f) * float(range)));
@@ -571,6 +583,9 @@ private:
 						case IPT_BUTTON2:     field.set_value(pedal ? 1 : 0); break;
 						case IPT_LIGHTGUN_X:  axis(gun_x); break;
 						case IPT_LIGHTGUN_Y:  axis(gun_y); break;
+						case IPT_PADDLE:      axis(steer); break;   // steering wheel
+						case IPT_PEDAL:       axis(gas); break;
+						case IPT_PEDAL2:      axis(brake); break;
 						default: break;
 						}
 					}
@@ -607,6 +622,8 @@ private:
 	bool m_lastStart = false;
 	bool m_lastTrigger = false;
 	bool m_lastPedal = false;
+	bool m_lastViewGeneric = false;
+	int m_vrIndex = 0;
 	std::chrono::steady_clock::time_point m_lastRateTime = std::chrono::steady_clock::now();
 };
 
@@ -1528,6 +1545,10 @@ extern "C" void tcvr_m2_scene_raw_reset(void)
 {
 	s_m2_scene.raw_pending_vertices.clear();
 	s_m2_scene.raw_pending_prims.clear();
+}
+extern "C" void tcvr_m2_scene_raw_commit(void)
+{
+	s_m2_scene.raw_fresh = true;
 }
 extern "C" void tcvr_m2_scene_end(const tcvr_m2_frame *fp)
 {

@@ -358,6 +358,20 @@ protected:
 	void build_overlay_mask(bitmap_rgb32 &bitmap, const rectangle &cliprect);
 	void apply_overlay_stencil(bitmap_rgb32 &bitmap, const rectangle &cliprect);
 
+	// TCVR (23/09): the frame as geometry for the XR GPU backend, in the Model 2 scene format (tcvr_m2_scene.h).
+	// Each finished quad is kept in camera space BEFORE the board clips it, with its lit colour, its viewport
+	// group and its submission order; MAME's exact draw order (groups in sequence, far to near inside a group)
+	// becomes the published rank. 2D: the tilemaps behind the 3D and the HUD tilemaps over it, apart.
+	struct tcvr_quad { float v[4][3]; uint32_t col; float z; uint32_t group, seq; float xc, yc, zoomx, zoomy, viewx, viewy; int32_t l, t, r, b; };
+	std::vector<tcvr_quad> m_tcvr_quads;
+	uint32_t m_tcvr_group = 0;
+	render_pass m_tcvr_pass = RENDER_BELOW_HUD;
+	std::vector<uint32_t> m_tcvr_back2d;
+	bitmap_rgb32 m_tcvr_front2d;
+	float m_tcvr_focus_x = 0.0f, m_tcvr_focus_y = 0.0f;
+	void tcvr_record_quad(const quad_t &q);
+	void tcvr_publish_scene(screen_device &screen, const rectangle &cliprect);
+
 	required_shared_ptr<uint16_t> m_paletteram16;
 	required_device<nvram_device> m_nvram;
 	required_device<palette_device> m_palette;

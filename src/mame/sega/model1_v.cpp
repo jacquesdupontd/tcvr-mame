@@ -7,6 +7,9 @@
 #include "cpu/mb86233/mb86233.h"
 
 #include "corefloat.h"
+#include "tcvr_m2_scene.h"
+
+#include <algorithm>
 
 #include <glm/geometric.hpp>
 
@@ -582,6 +585,10 @@ void model1_state::draw_quads(bitmap_rgb32 &bitmap, const rectangle &cliprect)
 	view->y1 = std::max(view->y1, cliprect.min_y);
 	view->y2 = std::min(view->y2, cliprect.max_y);
 
+	// TCVR mode 2: the XR backend draws the recorded 3D itself; skip only the pixels (the above-HUD pass,
+	// which is not recorded, keeps MAME's raster).
+	if (m_tcvr_pass == RENDER_BELOW_HUD && tcvr_m2_scene_mode() >= 2)
+		count = 0;
 	for (int i = 0; i < count; i++)
 	{
 		fill_quad(bitmap, view, *m_quadind[i]);
@@ -1090,6 +1097,8 @@ void model1_state::push_object(uint32_t tex_adr, uint32_t poly_adr, uint32_t siz
 		if (flags & 0x00002000)
 			cquad.col |= MOIRE;
 
+		if (m_tcvr_pass == RENDER_BELOW_HUD && tcvr_m2_scene_mode())
+			tcvr_record_quad(cquad);
 		fclip_push_quad(0, cquad);
 
 	next:
@@ -1305,6 +1314,7 @@ int model1_state::skip_direct(int list_offset) const
 
 void model1_state::draw_objects(bitmap_rgb32 &bitmap, const rectangle &cliprect)
 {
+	++m_tcvr_group;   // MAME sorts each flushed batch on its own: a group of the published draw order
 	if (m_quadpt != &m_quaddb[0])
 	{
 		LOGMASKED(LOG_TGP, "VIDEO: sort&draw\n");
@@ -1450,6 +1460,7 @@ void model1_state::view_t::set_view_translation(float x, float y)
 
 void model1_state::tgp_render(bitmap_rgb32 &bitmap, const rectangle &cliprect, render_pass pass)
 {
+	m_tcvr_pass = pass;
 	m_render_done = 1;
 	if ((m_listctl[1] & 0x1f) == 0x1f)
 	{
@@ -1854,6 +1865,17 @@ uint32_t model1_state::screen_update_model1(screen_device &screen, bitmap_rgb32 
 	m_tiles->draw(screen, bitmap, cliprect, 2, 0, 0);
 	m_tiles->draw(screen, bitmap, cliprect, 0, 0, 0);
 
+	const bool tcvr_rec = tcvr_m2_scene_mode() != 0;
+	if (tcvr_rec)
+	{
+		m_tcvr_quads.clear();
+		m_tcvr_group = 0;
+		// the frame as it stands before any polygon: background colour + the tilemaps behind the 3D
+		m_tcvr_back2d.resize(size_t(cliprect.width()) * size_t(cliprect.height()));
+		for (int y = 0; y < cliprect.height(); y++)
+			std::memcpy(m_tcvr_back2d.data() + size_t(y) * cliprect.width(), &bitmap.pix(cliprect.min_y + y, cliprect.min_x), cliprect.width() * 4);
+	}
+
 	// 3D objects (0x01) and direct polys (0x02) render below the HUD tilemaps,
 	// sharing the per-viewport z-sort.
 	tgp_render(bitmap, cliprect, RENDER_BELOW_HUD);
@@ -1870,8 +1892,103 @@ uint32_t model1_state::screen_update_model1(screen_device &screen, bitmap_rgb32 
 	build_overlay_mask(bitmap, cliprect);
 	tgp_render(bitmap, cliprect, RENDER_ABOVE_HUD);
 	apply_overlay_stencil(bitmap, cliprect);
+	m_tcvr_pass = RENDER_BELOW_HUD;
+
+	if (tcvr_rec)
+		tcvr_publish_scene(screen, cliprect);
 
 	return 0;
+}
+
+void model1_state::tcvr_record_quad(const quad_t &q)
+{
+	const view_t *view = m_view.get();
+	tcvr_quad t;
+	for (int i = 0; i < 4; i++)
+	{
+		t.v[i][0] = q.p[i]->x; t.v[i][1] = q.p[i]->y; t.v[i][2] = q.p[i]->z;
+	}
+	t.col = uint32_t(q.col);
+	t.z = q.z;
+	t.group = m_tcvr_group;
+	t.seq = uint32_t(m_tcvr_quads.size());
+	t.xc = view->xc; t.yc = view->yc; t.zoomx = view->zoomx; t.zoomy = view->zoomy; t.viewx = view->viewx; t.viewy = view->viewy;
+	t.l = int32_t(view->x1); t.r = int32_t(view->x2);
+	t.t = int32_t(std::min(view->y1, view->y2)); t.b = int32_t(std::max(view->y1, view->y2));
+	if (m_tcvr_quads.size() < 65000)
+		m_tcvr_quads.push_back(t);
+}
+
+// Publishes the frame in the Model 2 scene format. The projection of Model 1 is
+//   sx = xc + viewx + zoomx * x / z ,  sy = yc - viewy - zoomy * y / z
+// and the Model 2 one is sx = center_x + x' / z , sy = (384 - center_y) - y' / z, so
+//   x' = zoomx * x + viewx * z ,  y' = zoomy * y + viewy * z ,  center = (xc, 384 - yc), focus = zoom.
+void model1_state::tcvr_publish_scene(screen_device &screen, const rectangle &cliprect)
+{
+	// MAME's order: groups in sequence, far to near inside a group, submission order on ties.
+	std::vector<uint32_t> order(m_tcvr_quads.size());
+	for (uint32_t i = 0; i < order.size(); i++) order[i] = i;
+	std::stable_sort(order.begin(), order.end(), [this](uint32_t a, uint32_t b) {
+		const tcvr_quad &qa = m_tcvr_quads[a], &qb = m_tcvr_quads[b];
+		if (qa.group != qb.group) return qa.group < qb.group;
+		return qa.z > qb.z;
+	});
+	// Focus of the largest viewport (the main camera).
+	int best_area = -1;
+	const uint32_t n = uint32_t(order.size());
+	for (uint32_t k = 0; k < n; k++)
+	{
+		const tcvr_quad &q = m_tcvr_quads[order[k]];
+		const int area = (q.r - q.l) * (q.b - q.t);
+		if (area > best_area) { best_area = area; m_tcvr_focus_x = q.zoomx; m_tcvr_focus_y = q.zoomy; }
+	}
+	tcvr_m2_scene_raw_reset();
+	for (uint32_t k = 0; k < n; k++)
+	{
+		const tcvr_quad &q = m_tcvr_quads[order[k]];
+		tcvr_m2_raw_vertex rv[4];
+		for (int i = 0; i < 4; i++)
+		{
+			const float z = q.v[i][2];
+			rv[i].x = q.zoomx * q.v[i][0] + q.viewx * z;
+			rv[i].y = q.zoomy * q.v[i][1] + q.viewy * z;
+			rv[i].z = z;
+			rv[i].u = rv[i].v = 0.0f;
+		}
+		tcvr_m2_prim p{};
+		p.clip_l = std::max(q.l, cliprect.min_x); p.clip_r = std::min(q.r, cliprect.max_x);
+		p.clip_t = std::max(q.t, cliprect.min_y); p.clip_b = std::min(q.b, cliprect.max_y);
+		p.checker = (q.col & MOIRE) ? 1u : 0u;
+		p.center_x = int32_t(q.xc);
+		p.center_y = int32_t(384.0f - q.yc);
+		p.zsort = n - 1 - k;           // drawn later = nearer = smaller rank
+		p.rgb = 0x01000000u | (q.col & 0x00ffffffu);
+		tcvr_m2_scene_raw_poly(rv, 4, &p);
+	}
+	tcvr_m2_scene_raw_commit();
+	tcvr_m2_scene_begin(cliprect.width(), cliprect.height());   // takes this frame's list
+	// HUD tilemaps on a transparent background (0 = transparent, as in the Model 2 frame).
+	if (m_tcvr_front2d.width() != cliprect.width() || m_tcvr_front2d.height() != cliprect.height())
+		m_tcvr_front2d.allocate(cliprect.width(), cliprect.height());
+	m_tcvr_front2d.fill(0);
+	const rectangle fr(0, cliprect.width() - 1, 0, cliprect.height() - 1);
+	m_tiles->draw(screen, m_tcvr_front2d, fr, 7, 0, 0);
+	m_tiles->draw(screen, m_tcvr_front2d, fr, 5, 0, 0);
+	m_tiles->draw(screen, m_tcvr_front2d, fr, 3, 0, 0);
+	m_tiles->draw(screen, m_tcvr_front2d, fr, 1, 0, 0);
+
+	tcvr_m2_frame fp{};
+	fp.width = cliprect.width();
+	fp.height = cliprect.height();
+	fp.focus_x = m_tcvr_focus_x;
+	fp.focus_y = m_tcvr_focus_y;
+	fp.back2d = m_tcvr_back2d.data();
+	fp.back2d_stride = u32(cliprect.width());
+	fp.front2d = &m_tcvr_front2d.pix(0);
+	fp.front2d_stride = u32(m_tcvr_front2d.rowpixels());
+	fp.emu_time = machine().time().as_double();
+	fp.mame_frame = screen.frame_number();
+	tcvr_m2_scene_end(&fp);
 }
 
 void model1_state::screen_vblank_model1(int state)
