@@ -747,6 +747,18 @@ extern "C" int tcvr_mame_boot_smoke(const char *driver_id, const char *rom_path,
 		options.set_value(OPTION_READCONFIG, 0, OPTION_PRIORITY_MAXIMUM);
 		options.set_value(OPTION_WRITECONFIG, 0, OPTION_PRIORITY_MAXIMUM);
 		options.set_value(OPTION_NVRAM_SAVE, 0, OPTION_PRIORITY_MAXIMUM);
+		// Test (24/09): run the game slightly faster so its frames land exactly two per refresh at 120 Hz (a 57.52 Hz
+		// board at 60 Hz = speed 1.0431). debug.tcvr.speed=<factor>; 1.0 = the cabinet's own speed.
+		{
+			char sp[PROP_VALUE_MAX] = {};
+			if (__system_property_get("debug.tcvr.speed", sp) > 0 && sp[0] >= '0' && sp[0] <= '9') {
+				const float f = float(atof(sp));
+				if (f > 0.5f && f < 2.0f) {
+					options.set_value(OPTION_SPEED, f, OPTION_PRIORITY_MAXIMUM);
+					__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_SPEED emulation speed x%.4f", f);
+				}
+			}
+		}
 		// Let MAME drop a video frame rather than fall behind. The simulation and
 		// the sound keep their original timing; only the picture skips, and a
 		// skipped picture is invisible here because the XR renderer already
