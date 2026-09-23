@@ -340,6 +340,20 @@ void m2comm_device::check_vint_irq()
 #ifdef M2COMM_SIMULATION
 void m2comm_device::comm_tick()
 {
+	if (m_linkenable == 0x01 && m_tcvr_solo)
+	{
+		if (m_linkalive != 0x01)
+		{
+			osd_printf_verbose("M2COMM: solo cabinet - link established - id 01 of 01\n");
+			m_linkalive = 0x01;
+			m_linkid = 0x01;
+			m_linkcount = 0x01;
+			m_shared[0] = 0x01;
+			m_shared[2] = m_linkid;
+			m_shared[3] = m_linkcount;
+		}
+		return;
+	}
 	if (m_linkenable == 0x01)
 	{
 		int frameStart = 0x2000;

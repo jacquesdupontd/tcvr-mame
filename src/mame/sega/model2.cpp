@@ -7686,9 +7686,17 @@ void model2_state::init_zerogun()
 
 void model2_state::init_sgt24h()
 {
-	//u32 *ROM = &memregion("maincpu")->as_u32();
-	//ROM[0x56578/4] = 0x08000004;
-	//ROM[0x5b3e8/4] = 0x08000004;
+	// TCVR (23/09): a single cabinet has no link partner, and the game waited forever on "CHECKING NETWORK
+	// NOW" (silent, no 3D). MAME's own two patches (left commented upstream) turn both waits into a branch
+	// to the next instruction. debug.tcvr.sgt24h.nolink=0 keeps the original code.
+	if (tcvr_prop_flag("debug.tcvr.sgt24h.nolink", true))
+	{
+		u32 *ROM = &memregion("maincpu")->as_u32();
+		ROM[0x56578/4] = 0x08000004;
+		ROM[0x5b3e8/4] = 0x08000004;
+	}
+	if (m_m2comm && tcvr_prop_flag("debug.tcvr.sgt24h.solo", true))
+		m_m2comm->set_solo(true);
 }
 
 void model2_state::init_powsledm()

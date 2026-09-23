@@ -41,6 +41,9 @@ public:
 
 	// IRQ logic - 5 = VINT, 7 = DLC
 	void check_vint_irq();
+	// TCVR (23/09): a lone cabinet. When the game enables the board, the link reads "established, node 1 of 1"
+	// at once instead of waiting forever for a partner socket (none on a headset). Set by the driver per game.
+	void set_solo(bool solo) { m_tcvr_solo = solo; }
 
 	void set_frameoffset(uint16_t offset) { m_frameoffset = offset; }
 
@@ -67,6 +70,7 @@ private:
 
 #ifdef M2COMM_SIMULATION
 	uint8_t m_linkenable = 0;
+	bool m_tcvr_solo = false;
 	uint16_t m_linktimer = 0;
 	uint8_t m_linkalive = 0;
 	uint8_t m_linkid = 0;

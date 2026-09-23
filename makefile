@@ -1231,7 +1231,7 @@ android-arm64: android-ndk generate $(PROJECTDIR_SDL)/$(MAKETYPE)-android-arm64/
 PROJECTDIR_TCVR := $(BUILDDIR)/projects/tcvr/$(FULLTARGET)
 
 $(PROJECTDIR_TCVR)/$(MAKETYPE)-android-arm64/Makefile: makefile $(SCRIPTS) $(GENIE)
-	$(SILENT) $(GENIE) $(PARAMS) --gcc=android-arm64 --gcc_version=$(CLANG_VERSION) --osd=tcvr --targetos=android --PLATFORM=arm64 --NOASM=1 $(MAKETYPE)
+	$(SILENT) $(GENIE) $(PARAMS) --gcc=android-arm64 --gcc_version=$(CLANG_VERSION) --osd=tcvr --targetos=android --PLATFORM=arm64 $(MAKETYPE)
 
 .PHONY: tcvr-android-arm64
 tcvr-android-arm64: tcvr-android-ndk generate $(PROJECTDIR_TCVR)/$(MAKETYPE)-android-arm64/Makefile
