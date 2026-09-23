@@ -113,6 +113,7 @@ struct tcvr_audio_store
 	std::int64_t rate_measured = 65536;   // 16.16, the producer's measured rate
 	std::atomic<int> policy_floor_ppm{ 990000 };
 	std::atomic<bool> policy_follow_producer{ false };
+	std::atomic<std::int32_t> policy_slew{ 900 };   // max ratio step per callback (8.8 fixed): pitch glide speed
 	std::atomic<int> policy_cushion_ms{ 120 };
 	std::uint64_t rate_last_write = 0;    // write cursor at the last measurement
 	std::size_t rate_output = 0;          // output frames since the last measurement
@@ -856,6 +857,16 @@ extern "C" int tcvr_mame_audio_info(int *rate, int *channels, std::uint64_t *wri
 	return 1;
 }
 
+// Pitch glide speed (23/09, Guillaume heard Virtua Cop "repitch a little"): the ratio follows the emulator's real
+// speed, and a 1% dip used to glide in under a second -- audible. A smaller step spreads the same correction over
+// a few seconds, which the ear takes as steady. The emergency path (cushion under half) keeps its fast step.
+extern "C" void tcvr_mame_audio_slew(int step)
+{
+	if (step < 50 || step > 25000) step = 900;
+	s_audio.policy_slew.store(step, std::memory_order_release);
+	__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_SOUND policy slewStep=%d", step);
+}
+
 // Generic audio policy chosen by the frontend profile, never by a hardcoded
 // game ID in MAME. The default is the proven 1% cushion-only reader.
 extern "C" void tcvr_mame_audio_configure(int floor_ppm, bool follow_producer, int cushion_ms)
@@ -1129,7 +1140,7 @@ extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size
 		// filled to the brim. A slew limit must be slow enough to be inaudible
 		// and fast enough to still be a control system.
 		std::int64_t const maximumStep =
-			(follow_producer && available < target / 2) ? 25000 : 900;
+			(follow_producer && available < target / 2) ? 25000 : s_audio.policy_slew.load(std::memory_order_relaxed);
 		std::int64_t delta = s_audio.ratio_fine - s_audio.ratio_applied;
 		if (delta > maximumStep) delta = maximumStep;
 		if (delta < -maximumStep) delta = -maximumStep;
