@@ -54,6 +54,10 @@
 #include "bus/rs232/rs232.h"
 #include "screen.h"
 
+#if defined(__ANDROID__)
+#include <sys/system_properties.h>
+#endif
+
 
 //**************************************************************************
 //  DEVICE DEFINITIONS
@@ -138,6 +142,19 @@ void model1io2_device::device_add_mconfig(machine_config &config)
 {
 	tmpz84c015_device &iocpu(TMPZ84C015(config, "iocpu", 19.6608_MHz_XTAL / 2)); // TMPZ84C015AF-12
 	iocpu.set_addrmap(AS_PROGRAM, &model1io2_device::mem_map);
+
+	// TCVR (23/09): CTC channels 2/3 clock the SIO baud rates of CN7/CN8, which nothing is plugged into here.
+	// Their 1-cycle ZC/TO pulses cost ~500k extra timer events a second, each one a scheduler slice for all
+	// four CPUs of a Model 2 (Virtua Cop ran at ~84 %). The SIO only counts edges: emit both at once.
+	// debug.tcvr.m2.ctcInstant=0 restores MAME's timed pulse (A/B).
+	{
+		bool instant = true;
+#if defined(__ANDROID__)
+		char value[PROP_VALUE_MAX] = {};
+		if (__system_property_get("debug.tcvr.m2.ctcInstant", value) > 0 && value[0] == '0') instant = false;
+#endif
+		iocpu.set_ctc_zc_instant_pulse(instant);
+	}
 
 	// SIO channel a baud rate adjusted by dsw1 1+2: 38400, 19200, 9600, 4800
 	iocpu.zc_callback<2>().set("iocpu", FUNC(tmpz84c015_device::rxca_w));

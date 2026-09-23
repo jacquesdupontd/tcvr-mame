@@ -86,6 +86,9 @@ public:
 
 	auto intr_callback() { return m_intr_cb.bind(); }
 	template <int Channel> auto zc_callback() { return m_zc_cb[Channel].bind(); } // m_zc_cb[3] not supported on a standard ctc, only used for the tmpz84c015
+	// TCVR: emit the ZC/TO pulse as both edges at once instead of a timer for the falling edge. Same edge
+	// count for edge-clocked consumers (SIO baud clocks), half the timer events. Opt-in per board.
+	void set_zc_instant_pulse(bool instant) { m_zc_instant_pulse = instant; }
 	template <int Channel> void set_clk(u32 clock) { channel_config(Channel).set_clock(clock); }
 	template <int Channel> void set_clk(const XTAL &xtal) { channel_config(Channel).set_clock(xtal); }
 
@@ -123,6 +126,7 @@ protected:
 	required_device_array<z80ctc_channel_device, 4> m_channel;  // subdevice for each channel
 	devcb_write_line                                m_intr_cb;  // interrupt callback
 	devcb_write_line::array<4>                      m_zc_cb;    // zero crossing/timer output callbacks
+	bool                                            m_zc_instant_pulse = false;
 
 	u8                                              m_vector;   // interrupt vector
 };

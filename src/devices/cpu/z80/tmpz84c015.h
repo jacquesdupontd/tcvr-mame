@@ -30,6 +30,7 @@ public:
 	// configuration helpers
 	template <int Channel> void set_clk_trg(u32 clock) { m_ctc.lookup()->set_clk<Channel>(clock); }
 	template <int Channel> void set_clk_trg(const XTAL &xtal) { m_ctc.lookup()->set_clk<Channel>(xtal); }
+	void set_ctc_zc_instant_pulse(bool instant) { m_ctc.lookup()->set_zc_instant_pulse(instant); }
 
 	// SIO callbacks
 	auto out_txda_callback() { return m_out_txda_cb.bind(); }

@@ -552,7 +552,10 @@ TIMER_CALLBACK_MEMBER(z80ctc_channel_device::timer_callback)
 
 	// generate the clock pulse
 	m_device->m_zc_cb[m_index](1);
-	m_zc_to_timer->adjust(m_device->clocks_to_attotime(1));
+	if (m_device->m_zc_instant_pulse)
+		m_device->m_zc_cb[m_index](0);
+	else
+		m_zc_to_timer->adjust(m_device->clocks_to_attotime(1));
 
 	// reset the down counter
 	m_down = m_tconst;
