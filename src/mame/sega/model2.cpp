@@ -121,6 +121,13 @@ namespace {
 // that must stay in the machine (its ROM is still audited) but must not run.
 // It survives resets because interface_pre_reset() re-applies it.
 // Set debug.tcvr.m2.cabinetCpus=1 to put them back for a control run.
+static bool tcvr_prop_flag(char const *name, bool fallback)
+{
+	char value[PROP_VALUE_MAX] = {};
+	if (__system_property_get(name, value) <= 0 || !value[0]) return fallback;
+	return value[0] == '1';
+}
+
 bool tcvr_cabinet_cpus_requested()
 {
 	// __system_property_get() returns 0 and leaves the buffer empty when the
@@ -2667,11 +2674,31 @@ void model2o_state::model2o(machine_config &config)
 	m_uart->rxrdy_handler().set(FUNC(model2o_state::sound_ready_w));
 	m_uart->txrdy_handler().set(FUNC(model2o_state::sound_ready_w));
 
-	clock_device &uart_clock(CLOCK(config, "uart_clock", 16_MHz_XTAL / 2 / 16)); // 16 times 31.25kHz (standard Sega/MIDI sound data rate)
-	uart_clock.signal_handler().set(m_uart, FUNC(i8251_device::write_txc));
-	uart_clock.signal_handler().append(m_uart, FUNC(i8251_device::write_rxc));
+	// TCVR (23/09, Virtua Cop): the 500 kHz UART clock toggled a timer a million times a second, each one a
+	// scheduler slice for all four CPUs. The i8251 only acts on edges (receive on rising, transmit on falling):
+	// a half-rate clock whose every toggle delivers one full pulse gives it the same pulses per second with half
+	// the events (transmit 1 us earlier inside a 32 us bit). debug.tcvr.m2.uartPulse=0 restores MAME's clock.
+	if (tcvr_prop_flag("debug.tcvr.m2.uartPulse", true))
+	{
+		clock_device &uart_clock(CLOCK(config, "uart_clock", 16_MHz_XTAL / 2 / 32));
+		uart_clock.signal_handler().set(FUNC(model2o_state::tcvr_uart_pulse_w));
+	}
+	else
+	{
+		clock_device &uart_clock(CLOCK(config, "uart_clock", 16_MHz_XTAL / 2 / 16)); // 16 times 31.25kHz (standard Sega/MIDI sound data rate)
+		uart_clock.signal_handler().set(m_uart, FUNC(i8251_device::write_txc));
+		uart_clock.signal_handler().append(m_uart, FUNC(i8251_device::write_rxc));
+	}
 
 	M2COMM(config, "m2comm");
+}
+
+void model2_state::tcvr_uart_pulse_w(int state)
+{
+	m_uart->write_txc(1);
+	m_uart->write_rxc(1);   // rising: receive
+	m_uart->write_txc(0);   // falling: transmit
+	m_uart->write_rxc(0);
 }
 
 u8 model2_state::driveio_portg_r()
