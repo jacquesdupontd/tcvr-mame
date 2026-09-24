@@ -314,6 +314,7 @@ private:
 	// geo commands
 	u32 *geo_nop( geo_state *geo, u32 opcode, u32 *input );
 	u32 *geo_object_data( geo_state *geo, u32 opcode, u32 *input );
+	u32 *geo_object_data_ts( geo_state *geo, u32 opcode, u32 *input );
 	u32 *geo_direct_data( geo_state *geo, u32 opcode, u32 *input );
 	u32 *geo_window_data( geo_state *geo, u32 opcode, u32 *input );
 	u32 *geo_texture_data( geo_state *geo, u32 opcode, u32 *input );
@@ -338,6 +339,7 @@ private:
 	void geo_parse_np_s( geo_state *geo, u32 *input, u32 count );
 	void geo_parse_nn_ns( geo_state *geo, u32 *input, u32 count );
 	void geo_parse_nn_s( geo_state *geo, u32 *input, u32 count );
+	void geo_parse_ts_skin( geo_state *geo, u32 *input, u32 count );
 
 	// raster functions
 	// main data input port
@@ -866,6 +868,8 @@ struct model2_state::geo_state
 	u32 *               polygon_rom = nullptr;      // Polygon ROM pointer
 	u32                 polygon_rom_mask = 0;       // Polygon ROM mask
 	float               matrix[12];                 // Current Transformation Matrix
+	float               matrix2[12]{};              // Top Skater: secondary matrix (command 0x1B), selected per vertex by command 0x11
+	bool                topskatr = false;           // Top Skater uploads its own geometrizer microcode (commands 0x11/0x1B/0x1C differ)
 	poly_vertex         focus;                      // Focus (x,y)
 	poly_vertex         light;                      // Light Vector
 	float               lod = 0;                    // LOD

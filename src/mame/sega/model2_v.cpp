@@ -1281,9 +1281,14 @@ void model2_state::geo_init(memory_region *polygon_rom)
 	m_geo->raster = m_raster.get();
 	m_geo->polygon_rom = (u32 *)polygon_rom->base();
 	m_geo->polygon_rom_mask = (polygon_rom->bytes() / 4) - 1;
+	// TCVR (25/09): Top Skater uploads its own geometrizer microcode, where commands 0x11/0x1B/0x1C differ from the
+	// HLE (no stored normals, a matrix chosen per vertex): see geo_parse_ts_skin. Traced on a PC build from the
+	// microcode dumped at geo_prg_w and disassembled.
+	m_geo->topskatr = !strncmp(machine().system().name, "topskatr", 8);
 
 	save_item(NAME(m_geo->mode));
 	save_item(NAME(m_geo->matrix));
+	save_item(NAME(m_geo->matrix2));
 	save_item(NAME(m_geo->lod));
 	save_item(NAME(m_geo->coef_table));
 	save_item(NAME(m_geo->polygon_ram0));
@@ -1988,6 +1993,127 @@ void model2_state::geo_parse_nn_s(geo_state *geo, u32 *input, u32 count)
 	model2_3d_push(raster, 0);
 }
 
+/*
+    Top Skater (command 0x11 of its own geometrizer microcode, TGPx4 pc 0x379 of the uploaded program):
+    - the object data has NO stored normals: header = 2 points, then per polygon the attribute word followed by
+      1 point for a triangle or 2 points for a quad (the generic format skips a normal and always carries 2 points);
+    - two-matrix skinning: bit 0 of each vertex's X word selects matrix 0 (command 0x0B) or matrix 1 (command 0x1B).
+      The microcode does PRP = bit * 9 (rotation) and AR4 = bit * 3 (translation) before transforming the vertex.
+    Lighting / focus / rasterizer output are the same as geo_parse_nn_s.
+*/
+void model2_state::geo_parse_ts_skin(geo_state *geo, u32 *input, u32 count)
+{
+	raster_state *raster = geo->raster;
+	poly_vertex point, normal, p0, p1, p2, p3;
+	u32  attr, i;
+
+	auto read_point = [geo](u32 *&in, poly_vertex &pt)
+	{
+		const u32 xw = *in++;
+		pt.x = u2f(xw);
+		pt.y = u2f(*in++);
+		pt.pz = u2f(*in++);
+		transform_point(&pt, (xw & 1) ? geo->matrix2 : geo->matrix);
+	};
+
+	read_point(input, point);
+	p0.x = point.x; p0.y = point.y; p0.pz = point.pz;
+	apply_focus(geo, &point);
+	model2_3d_push(raster, f2u(point.x) >> 8);
+	model2_3d_push(raster, f2u(point.y) >> 8);
+	model2_3d_push(raster, f2u(point.pz) >> 8);
+
+	read_point(input, point);
+	p1.x = point.x; p1.y = point.y; p1.pz = point.pz;
+	apply_focus(geo, &point);
+	model2_3d_push(raster, f2u(point.x) >> 8);
+	model2_3d_push(raster, f2u(point.y) >> 8);
+	model2_3d_push(raster, f2u(point.pz) >> 8);
+
+	for (i = 0; i < count; i++)
+	{
+		attr = *input++;
+		model2_3d_push(raster, attr & 0x0003ffff);
+
+		if ((attr & 3) == 0)
+			break;
+
+		float dotl, dotp, luminance, distance, specular, coef, face;
+		int32_t luma;
+		texture_parameter *texparam;
+
+		read_point(input, point);
+		p2.x = point.x; p2.y = point.y; p2.pz = point.pz;
+
+		vector_cross3(&normal, &p0, &p1, &p2);
+		normalize_vector(&normal);
+		dotl = dot_product(normal, geo->light);
+		dotp = dot_product(normal, point);
+		apply_focus(geo, &point);
+
+		face = 0x100;
+		if (dotp >= 0) face = 0;
+
+		texparam = &geo->texture_parameters[(attr>>18) & 0x1f];
+		if ((dotl * dotp) < 0) luminance = 0;
+		else luminance = fabs(dotl);
+
+		specular = ((2*dotl) * normal.pz) - geo->light.pz;
+		if (specular < 0) specular = 0;
+		if ((geo->mode & 1) == 0) specular = 0;
+		if (texparam->specular_control == 0) specular = 0;
+		if ((texparam->specular_control >> 1) != 0) specular *= specular;
+		if ((texparam->specular_control >> 2) != 0) specular *= specular;
+		if (((texparam->specular_control+1) >> 3) != 0) specular *= specular;
+		specular *= texparam->specular_scale;
+
+		luminance = (luminance * texparam->diffuse) + texparam->ambient + specular;
+		luminance = std::clamp(luminance, 0.0f, 255.0f);
+		luma = (int32_t)luminance + face;
+
+		coef = geo->coef_table[attr>>27];
+		distance = coef * fabs(dotp) * geo->lod;
+
+		model2_3d_push(raster, luma << 15);
+		model2_3d_push(raster, f2u(distance) >> 8);
+		model2_3d_push(raster, f2u(point.x) >> 8);
+		model2_3d_push(raster, f2u(point.y) >> 8);
+		model2_3d_push(raster, f2u(point.pz) >> 8);
+
+		if (attr & 1)
+		{
+			read_point(input, point);
+			p3.x = point.x; p3.y = point.y; p3.pz = point.pz;
+			apply_focus(geo, &point);
+			model2_3d_push(raster, f2u(point.x) >> 8);
+			model2_3d_push(raster, f2u(point.y) >> 8);
+			model2_3d_push(raster, f2u(point.pz) >> 8);
+		}
+		else
+		{
+			// triangle: no second point in the data
+			p3.x = p2.x; p3.y = p2.y; p3.pz = p2.pz;
+		}
+
+		switch ((attr>>8) & 3)
+		{
+			case 0:
+			case 2:
+				p0.x = p2.x; p0.y = p2.y; p0.pz = p2.pz;
+				p1.x = p3.x; p1.y = p3.y; p1.pz = p3.pz;
+				break;
+			case 1:
+				p1.x = p2.x; p1.y = p2.y; p1.pz = p2.pz;
+				break;
+			case 3:
+				p0.x = p3.x; p0.y = p3.y; p0.pz = p3.pz;
+				break;
+		}
+	}
+
+	model2_3d_push(raster, 0);
+}
+
 /*******************************************
  *
  *  Geometry Engine Commands
@@ -2059,6 +2185,34 @@ u32 *model2_state::geo_object_data(geo_state *geo, u32 opcode, u32 *input)
 	}
 
 	/* move by 4 parameters */
+	return input;
+}
+
+/* Command 11 (Top Skater microcode only): Object Data with per-vertex matrix selection, no stored normals */
+u32 *model2_state::geo_object_data_ts(geo_state *geo, u32 opcode, u32 *input)
+{
+	raster_state *raster = geo->raster;
+	u32  tpa = *input++;
+	u32  tha = *input++;
+	u32  oba = *input++;
+	u32  obc = *input++;
+	u32 *obp;
+
+	model2_3d_push(raster, opcode >> 23);
+	model2_3d_push(raster, tpa);
+	model2_3d_push(raster, tha);
+
+	if (oba & 0x01000000)
+		obp = &geo->polygon_ram1[oba & 0x7fff];
+	else if (oba & 0x00800000)
+		obp = &geo->polygon_rom[oba & geo->polygon_rom_mask];
+	else
+		obp = &geo->polygon_ram0[oba & 0x7fff];
+
+	if (obc == 0)
+		obc = 0xfffff;
+
+	geo_parse_ts_skin(geo, obp, obc);
 	return input;
 }
 
@@ -2598,7 +2752,10 @@ u32 *model2_state::geo_process_command(geo_state *geo, u32 opcode, u32 *input, b
 		case 0x0e: input = geo_test(geo, opcode, input);                  break;
 		case 0x0f: input = geo_end(geo, opcode, input); *end_code = true; break;
 		case 0x10: input = geo_dummy(geo, opcode, input);                 break;
-		case 0x11: input = geo_object_data(geo, opcode, input);           break;
+		case 0x11:
+			if (geo->topskatr) input = geo_object_data_ts(geo, opcode, input);
+			else input = geo_object_data(geo, opcode, input);
+			break;
 		case 0x12: input = geo_direct_data(geo, opcode, input);           break;
 		case 0x13: input = geo_window_data(geo, opcode, input);           break;
 		case 0x14: input = geo_log_data(geo, opcode, input);              break;
@@ -2608,8 +2765,14 @@ u32 *model2_state::geo_process_command(geo_state *geo, u32 opcode, u32 *input, b
 		case 0x18: input = geo_zsort_mode(geo, opcode, input);            break;
 		case 0x19: input = geo_focal_distance(geo, opcode, input);        break;
 		case 0x1a: input = geo_light_source(geo, opcode, input);          break;
-		case 0x1b: input = geo_matrix_write(geo, opcode, input);          break;
-		case 0x1c: input = geo_translate_write(geo, opcode, input);       break;
+		case 0x1b:
+			if (geo->topskatr) { for (int i = 0; i < 12; i++) geo->matrix2[i] = u2f(*input++); }
+			else input = geo_matrix_write(geo, opcode, input);
+			break;
+		case 0x1c:
+			if (geo->topskatr) std::copy(geo->matrix, geo->matrix + 12, geo->matrix2);
+			else input = geo_translate_write(geo, opcode, input);
+			break;
 		case 0x1d: input = geo_code_upload(geo, opcode, input);           break;
 		case 0x1e: input = geo_code_jump(geo, opcode, input);             break;
 		case 0x1f: input = geo_end(geo, opcode, input); *end_code = true; break;

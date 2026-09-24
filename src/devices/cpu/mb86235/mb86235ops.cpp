@@ -553,7 +553,10 @@ inline void mb86235_device::decode_aluop(uint8_t opcode, uint32_t src1, uint32_t
 
 		case 0x15: // ABS
 		{
-			src1 &= 0x7fffffff;
+			// TCVR (25/09): integer absolute value (two's complement). Masking the sign bit like a float FABS turned
+			// -5 into 0x7ffffffb (Top Skater's angle interpolation took the wrap-around branch).
+			if (src1 & 0x80000000)
+				src1 = uint32_t(0) - src1;
 			set_alu_flagsd(src1);
 			set_alureg(dst_which, src1);
 			break;
