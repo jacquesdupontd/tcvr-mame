@@ -363,10 +363,10 @@ protected:
 	// Each finished quad is kept in camera space BEFORE the board clips it, with its lit colour, its viewport
 	// group and its submission order; MAME's exact draw order (groups in sequence, far to near inside a group)
 	// becomes the published rank. 2D: the tilemaps behind the 3D and the HUD tilemaps over it, apart.
-	struct tcvr_quad { float v[4][3]; uint32_t col; float z; uint32_t group, seq; float xc, yc, zoomx, zoomy, viewx, viewy; int32_t l, t, r, b; uint32_t id; };
+	struct tcvr_quad { float v[4][3]; uint32_t col; float z; uint32_t group, seq; float xc, yc, zoomx, zoomy, viewx, viewy; int32_t l, t, r, b; uint32_t id, obj; };
 	// Smooth motion (24/09): an id per quad shared by every copy of the same model face -- model address, colour
 	// table, face index; the XR side tells the copies apart by position to interpolate between arcade frames.
-	uint32_t m_tcvr_obj_key = 0;
+	uint32_t m_tcvr_obj_key = 0, m_tcvr_obj_serial = 0;   // serial: which push_object call of the frame
 	std::vector<tcvr_quad> m_tcvr_quads;
 	uint32_t m_tcvr_group = 0;
 	render_pass m_tcvr_pass = RENDER_BELOW_HUD;

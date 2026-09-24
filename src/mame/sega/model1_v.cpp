@@ -909,6 +909,7 @@ void model1_state::push_object(uint32_t tex_adr, uint32_t poly_adr, uint32_t siz
 		// objects). The renderer tells copies apart by position after compensating the camera motion; an
 		// occurrence number did not work: it shifts by one whenever a copy leaves the view (24/09).
 		m_tcvr_obj_key = ((poly_adr & 0xffffff) * 2654435761u) ^ (tex_adr * 40503u + 0x9e37u);
+		++m_tcvr_obj_serial;
 	}
 
 	point_t *old_p0 = m_pointpt++;
@@ -1878,6 +1879,7 @@ uint32_t model1_state::screen_update_model1(screen_device &screen, bitmap_rgb32 
 	{
 		m_tcvr_quads.clear();
 		m_tcvr_group = 0;
+		m_tcvr_obj_serial = 0;
 		// the frame as it stands before any polygon: background colour + the tilemaps behind the 3D
 		m_tcvr_back2d.resize(size_t(cliprect.width()) * size_t(cliprect.height()));
 		for (int y = 0; y < cliprect.height(); y++)
@@ -1922,6 +1924,7 @@ void model1_state::tcvr_record_quad(const quad_t &q, uint32_t face)
 	t.seq = uint32_t(m_tcvr_quads.size());
 	t.xc = view->xc; t.yc = view->yc; t.zoomx = view->zoomx; t.zoomy = view->zoomy; t.viewx = view->viewx; t.viewy = view->viewy;
 	t.id = ((m_tcvr_obj_key ^ (face * 0x85ebca6bu)) * 0xc2b2ae35u) >> 8;   // 24 bits: exact in a float
+	t.obj = m_tcvr_obj_serial;
 	t.l = int32_t(view->x1); t.r = int32_t(view->x2);
 	t.t = int32_t(std::min(view->y1, view->y2)); t.b = int32_t(std::max(view->y1, view->y2));
 	if (m_tcvr_quads.size() < 65000)
@@ -1963,7 +1966,7 @@ void model1_state::tcvr_publish_scene(screen_device &screen, const rectangle &cl
 			rv[i].y = q.zoomy * q.v[i][1] + q.viewy * z;
 			rv[i].z = z;
 			rv[i].u = float(q.id);        // Model 1 has no texture coordinates: the smooth-motion id travels here
-			rv[i].v = float(i);
+			rv[i].v = float(i + 4 * (q.obj & 0x3fffff));   // corner + 4 * object serial (exact in a float)
 		}
 		tcvr_m2_prim p{};
 		p.clip_l = std::max(q.l, cliprect.min_x); p.clip_r = std::min(q.r, cliprect.max_x);
