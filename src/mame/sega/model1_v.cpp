@@ -903,6 +903,13 @@ void model1_state::push_object(uint32_t tex_adr, uint32_t poly_adr, uint32_t siz
 	if (!size)
 		size = 0xffffffff;
 
+	if (m_tcvr_pass == RENDER_BELOW_HUD && tcvr_m2_scene_mode())
+	{
+		const uint32_t base = (poly_adr & 0x800000) | (poly_adr & 0x7fffff);
+		const uint32_t occ = m_tcvr_occurrence[base]++;
+		m_tcvr_obj_key = base * 2654435761u ^ (occ * 40503u + 0x9e37u);
+	}
+
 	point_t *old_p0 = m_pointpt++;
 	point_t *old_p1 = m_pointpt++;
 
@@ -1098,7 +1105,7 @@ void model1_state::push_object(uint32_t tex_adr, uint32_t poly_adr, uint32_t siz
 			cquad.col |= MOIRE;
 
 		if (m_tcvr_pass == RENDER_BELOW_HUD && tcvr_m2_scene_mode())
-			tcvr_record_quad(cquad);
+			tcvr_record_quad(cquad, uint32_t(i));
 		fclip_push_quad(0, cquad);
 
 	next:
@@ -1870,6 +1877,7 @@ uint32_t model1_state::screen_update_model1(screen_device &screen, bitmap_rgb32 
 	{
 		m_tcvr_quads.clear();
 		m_tcvr_group = 0;
+		m_tcvr_occurrence.clear();
 		// the frame as it stands before any polygon: background colour + the tilemaps behind the 3D
 		m_tcvr_back2d.resize(size_t(cliprect.width()) * size_t(cliprect.height()));
 		for (int y = 0; y < cliprect.height(); y++)
@@ -1900,7 +1908,7 @@ uint32_t model1_state::screen_update_model1(screen_device &screen, bitmap_rgb32 
 	return 0;
 }
 
-void model1_state::tcvr_record_quad(const quad_t &q)
+void model1_state::tcvr_record_quad(const quad_t &q, uint32_t face)
 {
 	const view_t *view = m_view.get();
 	tcvr_quad t;
@@ -1913,6 +1921,7 @@ void model1_state::tcvr_record_quad(const quad_t &q)
 	t.group = m_tcvr_group;
 	t.seq = uint32_t(m_tcvr_quads.size());
 	t.xc = view->xc; t.yc = view->yc; t.zoomx = view->zoomx; t.zoomy = view->zoomy; t.viewx = view->viewx; t.viewy = view->viewy;
+	t.id = ((m_tcvr_obj_key ^ (face * 0x85ebca6bu)) * 0xc2b2ae35u) >> 8;   // 24 bits: exact in a float
 	t.l = int32_t(view->x1); t.r = int32_t(view->x2);
 	t.t = int32_t(std::min(view->y1, view->y2)); t.b = int32_t(std::max(view->y1, view->y2));
 	if (m_tcvr_quads.size() < 65000)
@@ -1953,7 +1962,8 @@ void model1_state::tcvr_publish_scene(screen_device &screen, const rectangle &cl
 			rv[i].x = q.zoomx * q.v[i][0] + q.viewx * z;
 			rv[i].y = q.zoomy * q.v[i][1] + q.viewy * z;
 			rv[i].z = z;
-			rv[i].u = rv[i].v = 0.0f;
+			rv[i].u = float(q.id);        // Model 1 has no texture coordinates: the smooth-motion id travels here
+			rv[i].v = float(i);
 		}
 		tcvr_m2_prim p{};
 		p.clip_l = std::max(q.l, cliprect.min_x); p.clip_r = std::min(q.r, cliprect.max_x);

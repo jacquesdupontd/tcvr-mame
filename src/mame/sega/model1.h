@@ -25,6 +25,7 @@
 #include <glm/vec3.hpp>
 
 #include <functional>
+#include <unordered_map>
 
 class model1_state : public driver_device
 {
@@ -362,14 +363,18 @@ protected:
 	// Each finished quad is kept in camera space BEFORE the board clips it, with its lit colour, its viewport
 	// group and its submission order; MAME's exact draw order (groups in sequence, far to near inside a group)
 	// becomes the published rank. 2D: the tilemaps behind the 3D and the HUD tilemaps over it, apart.
-	struct tcvr_quad { float v[4][3]; uint32_t col; float z; uint32_t group, seq; float xc, yc, zoomx, zoomy, viewx, viewy; int32_t l, t, r, b; };
+	struct tcvr_quad { float v[4][3]; uint32_t col; float z; uint32_t group, seq; float xc, yc, zoomx, zoomy, viewx, viewy; int32_t l, t, r, b; uint32_t id; };
+	// Smooth motion (24/09): a stable id per quad across frames -- model address, occurrence of that model in the
+	// frame, face index -- so the XR side can interpolate each vertex between two arcade frames.
+	std::unordered_map<uint32_t, uint32_t> m_tcvr_occurrence;
+	uint32_t m_tcvr_obj_key = 0;
 	std::vector<tcvr_quad> m_tcvr_quads;
 	uint32_t m_tcvr_group = 0;
 	render_pass m_tcvr_pass = RENDER_BELOW_HUD;
 	std::vector<uint32_t> m_tcvr_back2d;
 	bitmap_rgb32 m_tcvr_front2d;
 	float m_tcvr_focus_x = 0.0f, m_tcvr_focus_y = 0.0f;
-	void tcvr_record_quad(const quad_t &q);
+	void tcvr_record_quad(const quad_t &q, uint32_t face);
 	void tcvr_publish_scene(screen_device &screen, const rectangle &cliprect);
 
 	required_shared_ptr<uint16_t> m_paletteram16;
