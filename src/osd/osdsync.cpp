@@ -21,6 +21,7 @@
 #include <thread>
 #if defined(__ANDROID__) || defined(__linux__)
 #include <sched.h>
+#include <unistd.h>
 #include <sys/system_properties.h>
 #include <android/log.h>
 #include <cstdlib>
@@ -115,7 +116,10 @@ int osd_get_num_processors(bool heavy_mt)
 #if defined(__ANDROID__) || defined(__linux__)
 	cpu_set_t allowed;
 	CPU_ZERO(&allowed);
-	if (sched_getaffinity(0, sizeof(allowed), &allowed) == 0)
+	// The PROCESS's cores (the main thread's mask, pid), not the calling thread's: the app pins the emulation
+	// thread to ONE core for steady audio, and read from there this answered 1 -- no rasteriser thread at all, so
+	// a board MAME draws itself (Namco System 23) rasterised everything on the emulation thread (24/09).
+	if (sched_getaffinity(getpid(), sizeof(allowed), &allowed) == 0)
 	{
 		int const usable = CPU_COUNT(&allowed);
 		if (usable > 0)
@@ -731,6 +735,16 @@ static void *worker_thread_entry(void *param)
 {
 	auto *thread = (work_thread_info *)param;
 	osd_work_queue &queue = thread->queue;
+
+#if defined(__ANDROID__)
+	{   // A new thread inherits its creator's affinity: the emulation thread's single core. Rasterisers get the
+		// process's cores (24/09, see osd_get_num_processors).
+		cpu_set_t procmask;
+		CPU_ZERO(&procmask);
+		if (sched_getaffinity(getpid(), sizeof(procmask), &procmask) == 0 && CPU_COUNT(&procmask) > 0)
+			sched_setaffinity(0, sizeof(procmask), &procmask);
+	}
+#endif
 
 	// loop until we exit
 	for ( ;; )

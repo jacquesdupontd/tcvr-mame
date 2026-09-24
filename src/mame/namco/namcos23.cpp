@@ -1231,6 +1231,10 @@ It can also be used with Final Furlong when wired correctly.
 */
 
 #include "emu.h"
+#include <chrono>
+#if defined(__ANDROID__)
+#include <android/log.h>
+#endif
 #include "bus/jvs/namcoio.h"
 #include "bus/rs232/rs232.h"
 #include "cpu/h8/h83002.h"
@@ -4601,14 +4605,40 @@ void namcos23_state::render_run(screen_device &screen, bitmap_rgb32 &bitmap)
 	const namcos23_render_entry *re = render.entries[!render.cur];
 
 	render.poly_count = 0;
+#if defined(__ANDROID__)
+	using tclk = std::chrono::steady_clock;
+	const auto t0 = tclk::now();
+#endif
 	for (int i = 0; i < render.count[!render.cur]; i++)
 	{
 		dispatch_render_entry(re);
 		re++;
 	}
+#if defined(__ANDROID__)
+	const auto t1 = tclk::now();
+#endif
 
 	render.polymgr->render_flush(screen, bitmap);
+#if defined(__ANDROID__)
+	const auto t2 = tclk::now();
+#endif
 	render.polymgr->wait();
+#if defined(__ANDROID__)
+	{   // TCVR (24/09): where the video time goes on the Quest (geometry / queueing / waiting for the rasteriser)
+		static double a = 0, b = 0, c = 0; static unsigned n = 0, polys = 0;
+		const auto t3 = tclk::now();
+		a += std::chrono::duration<double, std::milli>(t1 - t0).count();
+		b += std::chrono::duration<double, std::milli>(t2 - t1).count();
+		c += std::chrono::duration<double, std::milli>(t3 - t2).count();
+		polys += render.poly_count;
+		if (++n == 60)
+		{
+			__android_log_print(ANDROID_LOG_INFO, "TCVR_S23", "video per frame: geometry %.2f ms, queue %.2f ms, wait raster %.2f ms, polys %u",
+				a / n, b / n, c / n, polys / n);
+			a = b = c = 0; n = 0; polys = 0;
+		}
+	}
+#endif
 
 	render.cur = !render.cur;
 	render.count[render.cur] = 0;
@@ -4978,6 +5008,16 @@ u32 gorgon_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, con
 
 u32 namcos23_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, const rectangle &cliprect)
 {
+#if defined(__ANDROID__)
+	struct tcvr_timer_scope {
+		std::chrono::steady_clock::time_point t = std::chrono::steady_clock::now();
+		~tcvr_timer_scope() {
+			static double acc = 0; static unsigned n = 0;
+			acc += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
+			if (++n == 60) { __android_log_print(ANDROID_LOG_INFO, "TCVR_S23", "screen_update total %.2f ms per frame", acc / n); acc = 0; n = 0; }
+		}
+	} tcvr_scope;
+#endif
 	if (machine().video().skip_this_frame())
 	{
 		m_render.cur = !m_render.cur;
