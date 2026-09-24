@@ -61,6 +61,7 @@ public:
 	void model1(machine_config &config) ATTR_COLD;
 	void vf(machine_config &config) ATTR_COLD;
 	void vr(machine_config &config) ATTR_COLD;
+	void init_vr() ATTR_COLD;
 	void vformula(machine_config &config) ATTR_COLD;
 	void swa(machine_config &config) ATTR_COLD;
 	void wingwar(machine_config &config) ATTR_COLD;

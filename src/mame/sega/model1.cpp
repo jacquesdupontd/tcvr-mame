@@ -1336,6 +1336,60 @@ Virtua Racing
         Sega game ID# 833-8942 VIRTUA RACING TWIN
    Sega ROM board ID# 834-8941
 */
+
+#if defined(__ANDROID__)
+#include <sys/system_properties.h>
+#endif
+
+// TCVR (24/09): Virtua Racing's draw distance. Found by tracing the display list back on a PC build of MAME: the
+// routine at FF7D38 walks the 5x5 cells (a 16x16 grid over the course) around the camera's cell, through an
+// order table (FF7E1F) and an offset table (FF7E38), and keeps the cells a 25-bit direction mask calls visible.
+// Only what lies in the cabinet's narrow view survives: in a headset, looking to the side or back showed nothing.
+// debug.tcvr.vr.drawGrid = 7 (default) walks 7x7 cells with no direction mask; 5 keeps the original code.
+// New tables go in the erased tail of epr-14879a (0xFFF120 onwards, 3792 bytes of FF). Measured on the demo race:
+// 49 -> 63 objects a frame, the game keeps its 30 Hz.
+void model1_state::init_vr()
+{
+	int n = 7;
+#if defined(__ANDROID__)
+	char value[PROP_VALUE_MAX] = {};
+	if (__system_property_get("debug.tcvr.vr.drawGrid", value) > 0 && value[0])
+		n = atoi(value);
+#endif
+	if (n != 7)
+		return;
+	u8 *rom = memregion("maincpu")->base();
+	auto w8 = [rom](u32 a, u8 v) { rom[a] = v; };
+	auto w32 = [&](u32 a, u32 v) { for (int i = 0; i < 4; i++) w8(a + i, u8(v >> (8 * i))); };
+	static const u8 orig[25] = { 0x0c,0x11,0x0d,0x07,0x0b,0x12,0x08,0x06,0x10,0x16,0x0e,0x02,0x0a,0x17,0x09,0x01,0x0f,0x15,0x13,0x03,0x05,0x18,0x04,0x00,0x14 };
+	const int h = n / 2;
+	std::vector<u8> order;
+	bool used[64] = {};
+	for (u8 i5 : orig)   // the original 25 first, in their order (the first 9 are the near set)
+	{
+		const int idx = (i5 / 5 - 2 + h) * n + (i5 % 5 - 2 + h);
+		order.push_back(u8(idx)); used[idx] = true;
+	}
+	for (int r = -h; r <= h; r++)
+		for (int c = -h; c <= h; c++)
+		{
+			const int idx = (r + h) * n + (c + h);
+			if (!used[idx]) { order.push_back(u8(idx)); used[idx] = true; }
+		}
+	const u32 t1 = 0xfff200, t2 = 0xfff280;
+	for (size_t i = 0; i < order.size(); i++) w8(t1 + i, order[i]);
+	for (int r = -h; r <= h; r++)
+		for (int c = -h; c <= h; c++)
+			w8(t2 + (r + h) * n + (c + h), u8((r * 16 + c) & 0xff));
+	w32(0xff7d48, t1 - 0xff7d45);       // movea.b order[PC], R19
+	w32(0xff7d66, t2 - 0xff7d62);       // movs.bw offsets[PC](R0), R1
+	w8(0xff7d3b, u8(n * n));            // loop count
+	w8(0xff7d81, u8(n * n - 9));        // the first 9 remain the near set
+	w8(0xff7d60, 0xcd); w8(0xff7d61, 0xcd);   // grid-border mask test: 25 bits only
+	w8(0xff7d8f, 0xcd); w8(0xff7d90, 0xcd);   // direction mask tests: 25 bits only
+	w8(0xff7d9f, 0xcd); w8(0xff7da0, 0xcd);
+}
+
 ROM_START( vr )
 	MODEL1_CPU_BOARD
 
@@ -1998,7 +2052,7 @@ void netmerc_state::netmerc(machine_config &config)
 
 //    YEAR  NAME        PARENT   MACHINE     INPUT       CLASS          INIT        ROTATION  COMPANY  FULLNAME                    FLAGS
 GAME( 1993, vf,         0,       vf,         vf,         model1_state,  empty_init, ROT0,     "Sega",  "Virtua Fighter",           MACHINE_NOT_WORKING )
-GAMEL(1992, vr,         0,       vr,         vr,         model1_state,  empty_init, ROT0,     "Sega",  "Virtua Racing",            0, layout_vr )
+GAMEL(1992, vr,         0,       vr,         vr,         model1_state,  init_vr,    ROT0,     "Sega",  "Virtua Racing",            0, layout_vr )
 GAME( 1993, vformula,   vr,      vformula,   vr,         model1_state,  empty_init, ROT0,     "Sega",  "Virtua Formula",           MACHINE_IMPERFECT_GRAPHICS )
 GAME( 1994, swa,        0,       swa,        swa,        model1_state,  empty_init, ROT0,     "Sega",  "Star Wars (Sega, US)",     MACHINE_IMPERFECT_GRAPHICS | MACHINE_IMPERFECT_CONTROLS )
 GAME( 1994, swaj,       swa,     swa,        swa,        model1_state,  empty_init, ROT0,     "Sega",  "Star Wars (Sega, Japan)",  MACHINE_IMPERFECT_GRAPHICS | MACHINE_IMPERFECT_CONTROLS )
