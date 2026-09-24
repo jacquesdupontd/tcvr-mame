@@ -513,8 +513,12 @@ private:
 				if (ioport_port *port = find_port(tag))
 					if (ioport_field *field = port->field(0xffff))
 					{
+						// set_value() is a raw override: PORT_REVERSE is NOT applied (Super GT's pedals read "released" at
+						// full throttle, 24/09), so reverse here.
+						float n = std::clamp(normalized, 0.0f, 1.0f);
+						if (field->analog_reverse()) n = 1.0f - n;
 						ioport_value const range = field->maxval() - field->minval();
-						field->set_value(field->minval() + ioport_value(std::clamp(normalized, 0.0f, 1.0f) * float(range)));
+						field->set_value(field->minval() + ioport_value(n * float(range)));
 					}
 			};
 			if (find_port("STEER") && find_port("ACCEL"))
@@ -573,8 +577,10 @@ private:
 						if (fname == "Shift Up")   { field.set_value(shift_up ? 1 : 0); continue; }
 						if (fname == "Shift Down") { field.set_value(shift_down ? 1 : 0); continue; }
 						auto axis = [&field](float n) {
+							n = std::clamp(n, 0.0f, 1.0f);
+							if (field.analog_reverse()) n = 1.0f - n;   // raw override: reverse is not applied by MAME
 							ioport_value const range = field.maxval() - field.minval();
-							field.set_value(field.minval() + ioport_value(std::clamp(n, 0.0f, 1.0f) * float(range)));
+							field.set_value(field.minval() + ioport_value(n * float(range)));
 						};
 						switch (field.type())
 						{
