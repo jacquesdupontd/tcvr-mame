@@ -744,7 +744,9 @@ extern "C" int tcvr_mame_boot_smoke(const char *driver_id, const char *rom_path,
 
 	try
 	{
-		emu_options options(emu_options::option_support::GENERAL_AND_SYSTEM);
+		// FULL: slot and image options exist only in this mode, and rom_load_manager reads the slot option of every
+		// slot device -- GENERAL_AND_SYSTEM crashed on Time Crisis II, the first game here with a slot (24/09).
+		emu_options options(emu_options::option_support::FULL);
 		options.set_system_name(driver_id);
 		options.set_value(OPTION_MEDIAPATH, rom_path, OPTION_PRIORITY_MAXIMUM);
 		if (seconds > 0)
