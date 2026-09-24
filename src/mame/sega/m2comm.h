@@ -41,8 +41,7 @@ public:
 
 	// IRQ logic - 5 = VINT, 7 = DLC
 	void check_vint_irq();
-	// TCVR (23/09): a lone cabinet. When the game enables the board, the link reads "established, node 1 of 1"
-	// at once instead of waiting forever for a partner socket (none on a headset). Set by the driver per game.
+	// TCVR (24/09): a lone cabinet: the ring runs as if its sockets were open but silent (see comm_tick).
 	void set_solo(bool solo) { m_tcvr_solo = solo; }
 
 	void set_frameoffset(uint16_t offset) { m_frameoffset = offset; }

@@ -1353,7 +1353,7 @@ void model1_state::init_vr()
 	int n = 7;
 #if defined(__ANDROID__)
 	char value[PROP_VALUE_MAX] = {};
-	if (__system_property_get("debug.tcvr.vr.drawGrid", value) > 0 && value[0])
+	if (__system_property_get("debug.tcvr.vr.drawGrid", value) > 0 && value[0] && value[0] != '"')   // "" = released
 		n = atoi(value);
 #endif
 	if (n != 7)

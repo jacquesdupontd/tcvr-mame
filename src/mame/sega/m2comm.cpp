@@ -340,20 +340,6 @@ void m2comm_device::check_vint_irq()
 #ifdef M2COMM_SIMULATION
 void m2comm_device::comm_tick()
 {
-	if (m_linkenable == 0x01 && m_tcvr_solo)
-	{
-		if (m_linkalive != 0x01)
-		{
-			osd_printf_verbose("M2COMM: solo cabinet - link established - id 01 of 01\n");
-			m_linkalive = 0x01;
-			m_linkid = 0x01;
-			m_linkcount = 0x01;
-			m_shared[0] = 0x01;
-			m_shared[2] = m_linkid;
-			m_shared[3] = m_linkcount;
-		}
-		return;
-	}
 	if (m_linkenable == 0x01)
 	{
 		int frameStart = 0x2000;
@@ -384,7 +370,7 @@ void m2comm_device::comm_tick()
 			m_shared[3] = 0xff;
 
 			// check rx socket
-			if (!m_line_rx)
+			if (!m_line_rx && !m_tcvr_solo)
 			{
 				osd_printf_verbose("M2COMM: listen on %s\n", m_localhost);
 				uint64_t filesize; // unused
@@ -392,7 +378,7 @@ void m2comm_device::comm_tick()
 			}
 
 			// check tx socket
-			if (!m_line_tx)
+			if (!m_line_tx && !m_tcvr_solo)
 			{
 				osd_printf_verbose("M2COMM: connect to %s\n", m_remotehost);
 				uint64_t filesize; // unused
@@ -400,7 +386,10 @@ void m2comm_device::comm_tick()
 			}
 
 			// if both sockets are there check ring
-			if (m_line_rx && m_line_tx)
+			// TCVR (24/09): a lone cabinet behaves like the PC build whose sockets open and never hear anyone: the
+			// ring runs (m_zfg toggles -- the game polls it at 0xB8000 and waited forever on "CHECKING NETWORK NOW"
+			// when no socket could open on Android), frames go nowhere, and the game settles on STAND ALONE.
+			if ((m_line_rx && m_line_tx) || m_tcvr_solo)
 			{
 				m_zfg ^= 0x01;
 

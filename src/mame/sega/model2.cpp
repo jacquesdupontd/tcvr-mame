@@ -124,7 +124,8 @@ namespace {
 static bool tcvr_prop_flag(char const *name, bool fallback)
 {
 	char value[PROP_VALUE_MAX] = {};
-	if (__system_property_get(name, value) <= 0 || !value[0]) return fallback;
+	// "" (the bench's way to release a property) counts as unset
+	if (__system_property_get(name, value) <= 0 || !value[0] || value[0] == '"') return fallback;
 	return value[0] == '1';
 }
 
@@ -2518,8 +2519,8 @@ void model2_state::screen_vblank(int state)
 			extern u32 g_tcvr_vc_changes;
 			extern unsigned long g_tcvr_copro_push, g_tcvr_copro_pop;
 			__android_log_print(4, "TCVR_POLL",
-				"per57f: vblankFires=%u m_framenum=%u videoctlChanges=%u renderMode=%d tgpResultReads=%lu gameToTgp=%lu",
-				vbfire, (unsigned)m_framenum, g_tcvr_vc_changes, m_render_mode?1:0, g_tcvr_copro_push, g_tcvr_copro_pop);
+				"per57f: vblankFires=%u m_framenum=%u videoctlChanges=%u renderMode=%d tgpResultReads=%lu gameToTgp=%lu mainPC=%08x",
+				vbfire, (unsigned)m_framenum, g_tcvr_vc_changes, m_render_mode?1:0, g_tcvr_copro_push, g_tcvr_copro_pop, (unsigned)m_maincpu->pc());
 			g_tcvr_rd_fifo = g_tcvr_rd_videoctl = g_tcvr_rd_coproctl = g_tcvr_rd_rendermode = 0;
 			g_tcvr_vc_changes = 0; vbfire = 0; g_tcvr_copro_push = g_tcvr_copro_pop = 0;
 		}
@@ -7686,10 +7687,10 @@ void model2_state::init_zerogun()
 
 void model2_state::init_sgt24h()
 {
-	// TCVR (23/09): a single cabinet has no link partner, and the game waited forever on "CHECKING NETWORK
-	// NOW" (silent, no 3D). MAME's own two patches (left commented upstream) turn both waits into a branch
-	// to the next instruction. debug.tcvr.sgt24h.nolink=0 keeps the original code.
-	if (tcvr_prop_flag("debug.tcvr.sgt24h.nolink", true))
+	// TCVR (24/09): the real cause of "CHECKING NETWORK NOW" forever was the comm board's flag never toggling
+	// on Android (no socket opens; see m2comm solo). With the solo ring the ORIGINAL code reaches STAND ALONE,
+	// like the PC build. MAME's two commented patches stay available: debug.tcvr.sgt24h.nolink=1.
+	if (tcvr_prop_flag("debug.tcvr.sgt24h.nolink", false))
 	{
 		u32 *ROM = &memregion("maincpu")->as_u32();
 		ROM[0x56578/4] = 0x08000004;

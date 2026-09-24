@@ -38,7 +38,7 @@ std::atomic<bool> s_tcvr_exit_requested{ false };
 inline bool property_flag(const char *name, bool fallback)
 {
 	char value[PROP_VALUE_MAX] = {};
-	if (__system_property_get(name, value) <= 0)
+	if (__system_property_get(name, value) <= 0 || !value[0] || value[0] == '"')   // "" = released = unset
 		return fallback;
 	return value[0] == '1' || value[0] == 'y' || value[0] == 't';
 }
@@ -46,7 +46,7 @@ inline bool property_flag(const char *name, bool fallback)
 inline int property_int(const char *name, int fallback)
 {
 	char value[PROP_VALUE_MAX] = {};
-	if (__system_property_get(name, value) <= 0)
+	if (__system_property_get(name, value) <= 0 || !value[0] || value[0] == '"')   // "" = released = unset
 		return fallback;
 	return atoi(value);
 }
@@ -747,6 +747,9 @@ extern "C" int tcvr_mame_boot_smoke(const char *driver_id, const char *rom_path,
 		options.set_value(OPTION_READCONFIG, 0, OPTION_PRIORITY_MAXIMUM);
 		options.set_value(OPTION_WRITECONFIG, 0, OPTION_PRIORITY_MAXIMUM);
 		options.set_value(OPTION_NVRAM_SAVE, 0, OPTION_PRIORITY_MAXIMUM);
+		// debug.tcvr.mame.nodrc=1: interpreters instead of the ARM64 recompilers (to tell a recompiler bug apart)
+		if (property_flag("debug.tcvr.mame.nodrc", false))
+			options.set_value(OPTION_DRC, 0, OPTION_PRIORITY_MAXIMUM);
 		// Test (24/09): run the game slightly faster so its frames land exactly two per refresh at 120 Hz (a 57.52 Hz
 		// board at 60 Hz = speed 1.0431). debug.tcvr.speed=<factor>; 1.0 = the cabinet's own speed.
 		{
