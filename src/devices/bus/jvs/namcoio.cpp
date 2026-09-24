@@ -299,6 +299,10 @@ Note both games use a CCD camera for the gun sensor.
 
 #include "endianness.h"
 
+#if defined(__ANDROID__)
+#include <sys/system_properties.h>
+#endif
+
 #define LOG_OUTPUT (1U << 1)
 
 //#define VERBOSE (LOG_OUTPUT)
@@ -557,7 +561,18 @@ protected:
 
 		m_iocpu->write_sci_tx<0>().set(FUNC(namco_c78_jvs_io_device::txd));
 
-		config.set_maximum_quantum(attotime::from_hz(2 * 115200));
+		// TCVR (24/09): this quantum (the JVS serial line, emulated bit by bit at 115200 baud) splits the WHOLE
+		// machine into 230400 timeslices a second: on Time Crisis II the scheduler, not the CPUs, cost most of the
+		// emulation thread. debug.tcvr.jvs.quantumHz overrides it for measurements.
+		int qhz = 2 * 115200;
+#if defined(__ANDROID__)
+		{
+			char value[PROP_VALUE_MAX] = {};
+			if (__system_property_get("debug.tcvr.jvs.quantumHz", value) > 0 && value[0] >= '1' && value[0] <= '9')
+				qhz = atoi(value);
+		}
+#endif
+		config.set_maximum_quantum(attotime::from_hz(qhz));
 
 		add_jvs_port(config);
 	}

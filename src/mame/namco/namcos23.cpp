@@ -6403,8 +6403,51 @@ void namcos23_state::s23h8rwmap(address_map &map)
 
 ***************************************************************************/
 
+#if defined(__ANDROID__)
+#include <sys/system_properties.h>
+#include <android/log.h>
+#endif
+
 void namcos23_state::machine_start()
 {
+#if defined(__ANDROID__)
+	// TCVR (24/09): idle skips for the Quest. Profiled on Time Crisis II: the emulation thread was saturated
+	// (main MIPS ~370 ms/s, sub H8 ~300 ms/s, I/O board H8 ~330 ms/s of each second) and ran at ~80 %. Traced on
+	// a PC build: the main CPU waits for vblank in a 3-instruction loop (lw v0,0x74f4(gp) / beqz / nop at
+	// 800005F8), the sub CPU spins on a shared-RAM flag (mov.b @h'084050,r0l / bne at 1754). The DRC hotspot
+	// charges the loop's load 250 cycles (it only applies if that exact opcode sits at that address), the tap
+	// burns sub cycles while the flag is still set. debug.tcvr.s23.idle=0 turns both off.
+	{
+		char value[PROP_VALUE_MAX] = {};
+		const bool off = __system_property_get("debug.tcvr.s23.idle", value) > 0 && value[0] == '0';
+		if (!off)
+		{
+			m_maincpu->mips3drc_add_hotspot(0x800005f8, 0x8f8274f4, 250);
+			// The JVS I/O board's H8 only re-reads its ports in a loop (0x7000.. traced): a fraction of its clock is
+			// enough. debug.tcvr.s23.ioScale=<0.1..1> (default 1: off).
+			{
+				char sc[PROP_VALUE_MAX] = {};
+				double k = 1.0;   // 0.5 broke the boot: SUBCPU INITIALIZE TIME OUT (24/09)
+				if (__system_property_get("debug.tcvr.s23.ioScale", sc) > 0 && sc[0] >= '0' && sc[0] <= '9') k = atof(sc);
+				if (k >= 0.1 && k < 1.0)
+					if (device_t *io = subdevice(":jvs:namco_tssio:iocpu"))
+						io->set_clock_scale(k);
+			}
+			// Sub CPU waiting on the shared flag: it sleeps 20 us of emulated time, then reads the flag again.
+			// Burning cycles did nothing (the sub runs in tiny timeslices interleaved with the main CPU: the
+			// scheduler was the cost); sleeping until an interrupt froze the machine (its H8 internal interrupts
+			// do not signal that trigger).
+			m_subcpu->space(AS_PROGRAM).install_read_tap(0x084050, 0x084051, "tcvr_s23_idle",
+				[this](offs_t offset, u16 &data, u16 mem_mask)
+				{
+					const offs_t pc = m_subcpu->pc();
+					if (pc >= 0x1754 && pc <= 0x175c && (data & mem_mask) != 0)
+						m_subcpu->spin_until_time(attotime::from_usec(20));
+				});
+		}
+	}
+#endif
+
 	save_item(NAME(m_c404.poly_fade_r));
 	save_item(NAME(m_c404.poly_fade_g));
 	save_item(NAME(m_c404.poly_fade_b));
