@@ -364,9 +364,8 @@ protected:
 	// group and its submission order; MAME's exact draw order (groups in sequence, far to near inside a group)
 	// becomes the published rank. 2D: the tilemaps behind the 3D and the HUD tilemaps over it, apart.
 	struct tcvr_quad { float v[4][3]; uint32_t col; float z; uint32_t group, seq; float xc, yc, zoomx, zoomy, viewx, viewy; int32_t l, t, r, b; uint32_t id; };
-	// Smooth motion (24/09): a stable id per quad across frames -- model address, occurrence of that model in the
-	// frame, face index -- so the XR side can interpolate each vertex between two arcade frames.
-	std::unordered_map<uint32_t, uint32_t> m_tcvr_occurrence;
+	// Smooth motion (24/09): an id per quad shared by every copy of the same model face -- model address, colour
+	// table, face index; the XR side tells the copies apart by position to interpolate between arcade frames.
 	uint32_t m_tcvr_obj_key = 0;
 	std::vector<tcvr_quad> m_tcvr_quads;
 	uint32_t m_tcvr_group = 0;

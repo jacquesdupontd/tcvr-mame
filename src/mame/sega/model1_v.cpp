@@ -905,9 +905,10 @@ void model1_state::push_object(uint32_t tex_adr, uint32_t poly_adr, uint32_t siz
 
 	if (m_tcvr_pass == RENDER_BELOW_HUD && tcvr_m2_scene_mode())
 	{
-		const uint32_t base = (poly_adr & 0x800000) | (poly_adr & 0x7fffff);
-		const uint32_t occ = m_tcvr_occurrence[base]++;
-		m_tcvr_obj_key = base * 2654435761u ^ (occ * 40503u + 0x9e37u);
+		// Model address + colour table: the SAME key for every copy of a model (road sections, trackside
+		// objects). The renderer tells copies apart by position after compensating the camera motion; an
+		// occurrence number did not work: it shifts by one whenever a copy leaves the view (24/09).
+		m_tcvr_obj_key = ((poly_adr & 0xffffff) * 2654435761u) ^ (tex_adr * 40503u + 0x9e37u);
 	}
 
 	point_t *old_p0 = m_pointpt++;
@@ -1877,7 +1878,6 @@ uint32_t model1_state::screen_update_model1(screen_device &screen, bitmap_rgb32 
 	{
 		m_tcvr_quads.clear();
 		m_tcvr_group = 0;
-		m_tcvr_occurrence.clear();
 		// the frame as it stands before any polygon: background colour + the tilemaps behind the 3D
 		m_tcvr_back2d.resize(size_t(cliprect.width()) * size_t(cliprect.height()));
 		for (int y = 0; y < cliprect.height(); y++)
