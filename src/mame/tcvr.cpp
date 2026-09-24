@@ -576,6 +576,15 @@ private:
 						if (fname.rfind("VR", 0) == 0) { field.set_value((view && vrSeen == m_vrIndex) ? 1 : 0); ++vrSeen; continue; }
 						if (fname == "Shift Up")   { field.set_value(shift_up ? 1 : 0); continue; }
 						if (fname == "Shift Down") { field.set_value(shift_down ? 1 : 0); continue; }
+						// Top Skater (25/09): the deck's two axes and the menu selectors, by name
+						if (fname == "Select Left")  { field.set_value(shift_down ? 1 : 0); continue; }
+						if (fname == "Select Right") { field.set_value(shift_up ? 1 : 0); continue; }
+						if (fname == "Slide") {   // right trigger minus left trigger
+							float n = std::clamp(0.5f + 0.5f * (gas - brake), 0.0f, 1.0f);
+							if (field.analog_reverse()) n = 1.0f - n;
+							field.set_value(field.minval() + ioport_value(n * float(field.maxval() - field.minval())));
+							continue;
+						}
 						auto axis = [&field](float n) {
 							n = std::clamp(n, 0.0f, 1.0f);
 							if (field.analog_reverse()) n = 1.0f - n;   // raw override: reverse is not applied by MAME
@@ -593,6 +602,7 @@ private:
 						case IPT_PADDLE:      axis(steer); break;   // steering wheel
 						case IPT_PEDAL:       axis(gas); break;
 						case IPT_PEDAL2:      axis(brake); break;
+						case IPT_AD_STICK_X:  axis(steer); break;   // Top Skater's Curving (Slide handled by name)
 						default: break;
 						}
 					}
