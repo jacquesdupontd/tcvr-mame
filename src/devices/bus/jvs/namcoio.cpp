@@ -1620,9 +1620,83 @@ DEFINE_DEVICE_TYPE_PRIVATE(NAMCO_ASCA3A, device_jvs_interface, namco_asca_3a_dev
 DEFINE_DEVICE_TYPE_PRIVATE(NAMCO_ASCA5, device_jvs_interface, namco_asca_5_device, "namco_asca5", "Namco ASCA-5 (Multipurpose,JPN,Ver2.09)")
 DEFINE_DEVICE_TYPE_PRIVATE(NAMCO_CSZ1, device_jvs_interface, namco_csz1_device, "namco_csz1", "Namco CSZ1 MIU-I/O (GUN-EXTENTION,JPN,Ver2.05)")
 DEFINE_DEVICE_TYPE_PRIVATE(NAMCO_EMIO102, device_jvs_interface, namco_em_io1_02_device, "namco_emio102", "Namco EM I/O1-02 (Techno-Drive I/O,JPN&EXP,Ver2.00)")
+// TCVR (24/09): a high-level TSS-I/O for Time Crisis II on the Quest. The real board is an H8/3334 running its
+// firmware; on the headset it cost ~330 ms of each emulated second, and its bit-level JVS line forced a 2x115200 Hz
+// quantum on the whole machine (the scheduler, not the CPUs, was most of the emulation thread; any larger quantum
+// broke the boot). This device answers the JVS packets directly, timer based like every jvs_hle_device, with the
+// replies recorded from the real firmware on a PC build (identity, revisions, features, the two 0x70 commands),
+// reading the same input ports as namco_tssio_default.
+class namco_tss_io_hle_device :
+	public jvs_hle_device
+{
+public:
+	namco_tss_io_hle_device(const machine_config &mconfig, const char *tag, device_t *owner, uint32_t clock = 0) :
+		jvs_hle_device(mconfig, NAMCO_TSSIO_HLE, tag, owner, clock)
+	{
+	}
+
+protected:
+	virtual void device_add_mconfig(machine_config &config) override ATTR_COLD
+	{
+		add_jvs_port(config);
+	}
+
+	virtual ioport_constructor device_input_ports() const override ATTR_COLD
+	{
+		return INPUT_PORTS_NAME(namco_tssio_default);
+	}
+
+	// jvs_hle_device -- values recorded from tssioprog.ic3 (Ver2.02)
+	virtual const char *device_id() override { return "namco ltd.;TSS-I/O;Ver2.02;JPN,GUN-EXTENTION"; }
+	virtual uint8_t command_revision() override { return 0x11; }
+	virtual uint8_t jvs_revision() override { return 0x20; }
+	virtual uint8_t communication_revision() override { return 0x10; }
+	virtual uint8_t player_count() override { return 1; }
+	virtual uint8_t switch_count() override { return 12; }
+	virtual uint8_t coin_slots() override { return 1; }
+	virtual uint8_t screen_position_input_channels() override { return 1; }
+	virtual uint8_t screen_position_input_xbits() override { return 16; }
+	virtual uint8_t screen_position_input_ybits() override { return 16; }
+	virtual uint8_t output_slots() override { return 3; }
+
+	virtual void execute(uint8_t command) override
+	{
+		if (command != 0x70)
+		{
+			jvs_hle_device::execute(command);
+			return;
+		}
+		const uint8_t *parameters;
+		uint8_t *response;
+		if (!consume(1, parameters))
+			return;
+		if (parameters[0] == 0x04)
+		{
+			if (produce(3, response))
+			{
+				response[0] = ReportCode::Normal;
+				response[1] = 0xff;
+				response[2] = 0xff;
+			}
+		}
+		else if (parameters[0] == 0x02)
+		{
+			static const uint8_t reply[8] = { 0x19, 0x98, 0x01, 0x28, 0x03, 0x19, 0x31, 0x21 };
+			if (produce(9, response))
+			{
+				response[0] = ReportCode::Normal;
+				std::copy(std::begin(reply), std::end(reply), response + 1);
+			}
+		}
+		else
+			status_code(StatusCode::UnknownCommand);
+	}
+};
+
 DEFINE_DEVICE_TYPE_PRIVATE(NAMCO_EMPRI101, device_jvs_interface, namco_em_pri1_01_device, "namco_empri101", "Namco EM Pri1-01")
 DEFINE_DEVICE_TYPE_PRIVATE(NAMCO_FCA10, device_jvs_interface, namco_fca_10_device, "namco_fca10", "Namco FCA-1 (Multipurpose + Rotary Encoder,JPN,Ver1.00)")
 DEFINE_DEVICE_TYPE_PRIVATE(NAMCO_FCA11, device_jvs_interface, namco_fca_11_device, "namco_fca11", "Namco FCA-1 (Multipurpose + Rotary Encoder,JPN,Ver1.01)")
 DEFINE_DEVICE_TYPE_PRIVATE(NAMCO_FCB, device_jvs_interface, namco_fcb_device, "namco_fcb", "Namco FCB (TouchPanel&Multipurpose,JPN,Ver1.02)")
+DEFINE_DEVICE_TYPE_PRIVATE(NAMCO_TSSIO_HLE, device_jvs_interface, namco_tss_io_hle_device, "namco_tssio_hle", "Namco TSS-I/O (high level, TCVR)")
 DEFINE_DEVICE_TYPE_PRIVATE(NAMCO_TSSIO, device_jvs_interface, namco_tss_io_device, "namco_tssio", "Namco TSS-I/O (GUN-EXTENTION,JPN,Ver2.02)")
 DEFINE_DEVICE_TYPE_PRIVATE(NAMCO_XMIU1, device_jvs_interface, namco_xmiu1_device, "namco_xmiu1", "Namco XMIU1 TSS-I/O (GUN-EXTENTION,JPN,Ver2.11,Ver2.12)")

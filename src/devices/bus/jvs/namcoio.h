@@ -68,6 +68,7 @@ DECLARE_DEVICE_TYPE(NAMCO_FCA10, device_jvs_interface)
 DECLARE_DEVICE_TYPE(NAMCO_FCA11, device_jvs_interface)
 DECLARE_DEVICE_TYPE(NAMCO_FCB, device_jvs_interface)
 DECLARE_DEVICE_TYPE(NAMCO_TSSIO, device_jvs_interface)
+DECLARE_DEVICE_TYPE(NAMCO_TSSIO_HLE, device_jvs_interface)
 DECLARE_DEVICE_TYPE(NAMCO_XMIU1, device_jvs_interface)
 
 #endif

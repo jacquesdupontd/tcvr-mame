@@ -132,7 +132,7 @@ void jvs_hle_device::device_reset()
 	m_rotary_input_channels = rotary_input_channels();
 	m_screen_position_input_channels = screen_position_input_channels();
 	m_screen_position_input_xbits = screen_position_input_xbits();
-	m_screen_position_input_xbits = screen_position_input_ybits();
+	m_screen_position_input_ybits = screen_position_input_ybits();   // TCVR: upstream assigned xbits twice (ybits left uninitialised)
 
 	m_output_slots = output_slots();
 	m_output_mask = jvs_bitmask<uint64_t>(m_output_slots);

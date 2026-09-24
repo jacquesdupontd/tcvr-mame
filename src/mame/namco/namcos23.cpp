@@ -6850,10 +6850,24 @@ void namcos23_state::panicprk(machine_config &config)
 	m_jvs->set_default_option("namco_asca3a");
 }
 
+// TCVR (24/09): Time Crisis II's I/O board, high level by default on the Quest (see namco_tss_io_hle_device);
+// debug.tcvr.s23.jvsHle=0 keeps the real firmware.
+static const char *tcvr_tssio_option()
+{
+#if defined(__ANDROID__)
+	char value[PROP_VALUE_MAX] = {};
+	if (__system_property_get("debug.tcvr.s23.jvsHle", value) > 0 && value[0] == '0')
+		return "namco_tssio";
+	return "namco_tssio_hle";
+#else
+	return getenv("TCVR_TSSIO_HLE") ? "namco_tssio_hle" : "namco_tssio";
+#endif
+}
+
 void namcos23_state::timecrs2(machine_config &config)
 {
 	s23(config);
-	m_jvs->set_default_option("namco_tssio");
+	m_jvs->set_default_option(tcvr_tssio_option());
 }
 
 void namcoss23_state::ss23(machine_config &config)
@@ -6865,7 +6879,7 @@ void namcoss23_state::ss23(machine_config &config)
 void namcoss23_state::timecrs2v4a(machine_config &config)
 {
 	ss23(config);
-	m_jvs->set_default_option("namco_tssio");
+	m_jvs->set_default_option(tcvr_tssio_option());
 }
 
 void namcoss23_state::_500gp(machine_config &config)
