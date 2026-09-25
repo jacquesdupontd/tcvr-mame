@@ -88,6 +88,9 @@ struct tcvr_m2_prim
 	// first, and the first polygon written on a pixel stays (fill map). A polygon of a later window therefore
 	// covers an earlier window's whatever their depths -- the skater stayed in front of the ramp on the cabinet.
 	uint32_t window;
+	// Smooth motion (25/09): the polygon's object (polygon data address), its rank in the object, and which copy of
+	// that object it is in the frame. Model 1 carries its own ids in the raw vertices' u/v instead.
+	uint32_t motion_addr, motion_poly, motion_serial;
 };
 
 struct tcvr_m2_frame

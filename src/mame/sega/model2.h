@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <unordered_map>
 #include "315-5881_crypt.h"
 #include "315-5838_317-0229_comp.h"
 #include "dsb2.h"
@@ -844,6 +845,12 @@ struct model2_state::raster_state
 	u8              log_ram[0x8000];                // Log RAM pointer
 	u8              cur_window = 0;                 // Current window
 	plane           clip_plane[4][4];               // Polygon clipping planes
+	// TCVR smooth motion (25/09): which object (polygon data address) each polygon comes from, its rank in that
+	// object, and which copy of the object this is in the frame -- a stable identity across arcade frames.
+	u32             tcvr_obj_addr = 0;
+	u32             tcvr_poly_idx = 0;
+	u32             tcvr_obj_serial = 0;
+	std::unordered_map<u32, u32> tcvr_obj_count;
 };
 
 /*******************************************

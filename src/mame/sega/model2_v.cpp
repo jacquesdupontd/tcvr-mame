@@ -400,6 +400,7 @@ void model2_state::model2_3d_process_polygon(raster_state *raster, u32 attr)
 	float min_z, max_z;
 
 	static_assert(NumVerts == 3 || NumVerts == 4, "Polygon must have 3 or 4 vertices");
+	const u32 tcvr_rank = raster->tcvr_poly_idx++;   // before any culling: ranks stay stable
 
 	/* extract P0(n-1) */
 	object.v[1].x = u2f(raster->command_buffer[2] << 8);
@@ -560,6 +561,9 @@ void model2_state::model2_3d_process_polygon(raster_state *raster, u32 attr)
 		tp.center_y = raster->center[raster->center_sel][1];
 		tp.zsort = float_to_zval(zvalue, raster->z_adjust);
 		tp.window = raster->cur_window;
+		tp.motion_addr = raster->tcvr_obj_addr;
+		tp.motion_poly = tcvr_rank;
+		tp.motion_serial = raster->tcvr_obj_serial;
 		tcvr_m2_scene_raw_poly(rv, NumVerts, &tp);
 	}
 	if (cull == false)
@@ -841,6 +845,7 @@ void model2_state::render_frame_start()
 	/* reset the polygon list index */
 	raster->poly_list_index = 0;
 	tcvr_m2_scene_raw_reset();
+	raster->tcvr_obj_count.clear();
 
 	/* reset the sorted z list */
 	std::fill(std::begin(raster->poly_sorted_list), std::end(raster->poly_sorted_list), nullptr);
@@ -2145,6 +2150,9 @@ u32 *model2_state::geo_object_data(geo_state *geo, u32 opcode, u32 *input)
 	u32 *obp;                /* Object Pointer */
 
 	/* push the initial set of data to the 3d rasterizer */
+	raster->tcvr_obj_addr = oba;
+	raster->tcvr_poly_idx = 0;
+	raster->tcvr_obj_serial = raster->tcvr_obj_count[oba]++;
 	model2_3d_push(raster, opcode >> 23);
 	model2_3d_push(raster, tpa);
 	model2_3d_push(raster, tha);
@@ -2200,6 +2208,9 @@ u32 *model2_state::geo_object_data_ts(geo_state *geo, u32 opcode, u32 *input)
 	u32  obc = *input++;
 	u32 *obp;
 
+	raster->tcvr_obj_addr = oba;
+	raster->tcvr_poly_idx = 0;
+	raster->tcvr_obj_serial = raster->tcvr_obj_count[oba]++;
 	model2_3d_push(raster, opcode >> 23);
 	model2_3d_push(raster, tpa);
 	model2_3d_push(raster, tha);
