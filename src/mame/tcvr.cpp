@@ -1540,6 +1540,7 @@ struct tcvr_m2_scene_store
 		std::vector<tcvr_m2_prim> prims;
 		std::vector<tcvr_m2_raw_vertex> raw_vertices;
 		std::vector<tcvr_m2_prim> raw_prims;
+		std::vector<float> raw_motion;
 		std::vector<uint16_t> palram;
 		std::vector<uint16_t> colorxlat;
 		std::vector<uint8_t> lumaram;
@@ -1562,6 +1563,7 @@ struct tcvr_m2_scene_store
 	// latest complete list is published with every frame.
 	std::vector<tcvr_m2_raw_vertex> raw_pending_vertices, raw_last_vertices;
 	std::vector<tcvr_m2_prim> raw_pending_prims, raw_last_prims;
+	std::vector<float> raw_pending_motion, raw_last_motion;   // 16 floats per raw prim (see tcvr_m2_frame::raw_motion)
 	bool raw_fresh = false;
 	std::atomic<int> enabled{0};
 	bool invalid = false;   // the machine that published the slots is stopping: nothing to acquire
@@ -1584,6 +1586,7 @@ extern "C" void tcvr_m2_scene_invalidate()
 	s_m2_scene.recording = false;
 	s_m2_scene.raw_pending_vertices.clear(); s_m2_scene.raw_pending_prims.clear();
 	s_m2_scene.raw_last_vertices.clear(); s_m2_scene.raw_last_prims.clear();
+	s_m2_scene.raw_pending_motion.clear(); s_m2_scene.raw_last_motion.clear();
 	s_m2_scene.raw_fresh = false;
 	s_m2_scene.dropped_prims = s_m2_scene.dropped_vertices = 0;
 }
@@ -1614,12 +1617,15 @@ extern "C" void tcvr_m2_scene_begin(int width, int height)
 	{
 		s_m2_scene.raw_last_vertices.swap(s_m2_scene.raw_pending_vertices);
 		s_m2_scene.raw_last_prims.swap(s_m2_scene.raw_pending_prims);
+		s_m2_scene.raw_last_motion.swap(s_m2_scene.raw_pending_motion);
 		s_m2_scene.raw_pending_vertices.clear();
 		s_m2_scene.raw_pending_prims.clear();
+		s_m2_scene.raw_pending_motion.clear();
 		s_m2_scene.raw_fresh = false;
 	}
 	w.raw_vertices = s_m2_scene.raw_last_vertices;
 	w.raw_prims = s_m2_scene.raw_last_prims;
+	w.raw_motion = s_m2_scene.raw_last_motion;
 	w.frame.width = width;
 	w.frame.height = height;
 	s_m2_scene.dropped_prims = 0;
@@ -1647,7 +1653,7 @@ extern "C" void tcvr_m2_scene_poly(const tcvr_m2_vertex *v, int count, const tcv
 	w.prims.push_back(q);
 }
 
-extern "C" void tcvr_m2_scene_raw_poly(const tcvr_m2_raw_vertex *v, int count, const tcvr_m2_prim *p)
+extern "C" void tcvr_m2_scene_raw_poly_m(const tcvr_m2_raw_vertex *v, int count, const tcvr_m2_prim *p, const float *motion16)
 {
 	if (!s_m2_scene.enabled.load(std::memory_order_relaxed) || v == nullptr || p == nullptr || count < 3) return;
 	auto &pv = s_m2_scene.raw_pending_vertices;
@@ -1658,12 +1664,20 @@ extern "C" void tcvr_m2_scene_raw_poly(const tcvr_m2_raw_vertex *v, int count, c
 	q.vertex_count = uint32_t(count);
 	pv.insert(pv.end(), v, v + count);
 	pp.push_back(q);
+	auto &pm = s_m2_scene.raw_pending_motion;
+	if (motion16) pm.insert(pm.end(), motion16, motion16 + 16);
+	else pm.insert(pm.end(), 16, 0.0f);   // valid = 0
 	s_m2_scene.raw_fresh = true;
+}
+extern "C" void tcvr_m2_scene_raw_poly(const tcvr_m2_raw_vertex *v, int count, const tcvr_m2_prim *p)
+{
+	tcvr_m2_scene_raw_poly_m(v, count, p, nullptr);
 }
 extern "C" void tcvr_m2_scene_raw_reset(void)
 {
 	s_m2_scene.raw_pending_vertices.clear();
 	s_m2_scene.raw_pending_prims.clear();
+	s_m2_scene.raw_pending_motion.clear();
 }
 extern "C" void tcvr_m2_scene_raw_commit(void)
 {
@@ -1689,6 +1703,7 @@ extern "C" void tcvr_m2_scene_end(const tcvr_m2_frame *fp)
 	w.frame.raw_vertex_count = uint32_t(w.raw_vertices.size());
 	w.frame.raw_prims = w.raw_prims.data();
 	w.frame.raw_prim_count = uint32_t(w.raw_prims.size());
+	w.frame.raw_motion = (w.raw_motion.size() == w.raw_prims.size() * 16) ? w.raw_motion.data() : nullptr;
 	w.frame.palram = w.palram.empty() ? nullptr : w.palram.data();
 	w.frame.colorxlat = w.colorxlat.empty() ? nullptr : w.colorxlat.data();
 	w.frame.lumaram = w.lumaram.empty() ? nullptr : w.lumaram.data();

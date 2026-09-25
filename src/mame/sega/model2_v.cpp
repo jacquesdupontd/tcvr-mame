@@ -564,7 +564,12 @@ void model2_state::model2_3d_process_polygon(raster_state *raster, u32 attr)
 		tp.motion_addr = raster->tcvr_obj_addr;
 		tp.motion_poly = tcvr_rank;
 		tp.motion_serial = raster->tcvr_obj_serial;
-		tcvr_m2_scene_raw_poly(rv, NumVerts, &tp);
+		// the object matrix and focus these vertices were transformed with (smooth motion by the game's matrices)
+		float mo[16];
+		for (int mi = 0; mi < 12; mi++) mo[mi] = m_geo->matrix[mi];
+		mo[12] = m_geo->focus.x; mo[13] = m_geo->focus.y;
+		mo[14] = raster->tcvr_matrix_ok ? 1.0f : 0.0f; mo[15] = 0.0f;
+		tcvr_m2_scene_raw_poly_m(rv, NumVerts, &tp, mo);
 	}
 	if (cull == false)
 	{
@@ -2152,6 +2157,7 @@ u32 *model2_state::geo_object_data(geo_state *geo, u32 opcode, u32 *input)
 	/* push the initial set of data to the 3d rasterizer */
 	raster->tcvr_obj_addr = oba;
 	raster->tcvr_poly_idx = 0;
+	raster->tcvr_matrix_ok = true;
 	raster->tcvr_obj_serial = raster->tcvr_obj_count[oba]++;
 	model2_3d_push(raster, opcode >> 23);
 	model2_3d_push(raster, tpa);
@@ -2210,6 +2216,7 @@ u32 *model2_state::geo_object_data_ts(geo_state *geo, u32 opcode, u32 *input)
 
 	raster->tcvr_obj_addr = oba;
 	raster->tcvr_poly_idx = 0;
+	raster->tcvr_matrix_ok = false;   // per-vertex matrix: no single object matrix
 	raster->tcvr_obj_serial = raster->tcvr_obj_count[oba]++;
 	model2_3d_push(raster, opcode >> 23);
 	model2_3d_push(raster, tpa);

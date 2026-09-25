@@ -850,6 +850,7 @@ struct model2_state::raster_state
 	u32             tcvr_obj_addr = 0;
 	u32             tcvr_poly_idx = 0;
 	u32             tcvr_obj_serial = 0;
+	bool            tcvr_matrix_ok = true;          // false for Top Skater's per-vertex matrices (0x11)
 	std::unordered_map<u32, u32> tcvr_obj_count;
 };
 

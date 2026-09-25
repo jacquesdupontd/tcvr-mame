@@ -148,6 +148,10 @@ struct tcvr_m2_frame
 	uint32_t mame_frame;    // screen frame number
 	const tcvr_m2_raw_vertex *raw_vertices; uint32_t raw_vertex_count;   // pre-clip stream, submission order
 	const tcvr_m2_prim       *raw_prims;    uint32_t raw_prim_count;
+	// Smooth motion by the game's own matrices (25/09): per raw prim, 16 floats -- the object matrix the geometriser
+	// transformed its vertices with (12, transform_point order), the focus (x, y), valid (1/0), spare. The raw
+	// vertices are focus(M * object vertex): M_prev * M_cur^-1 gives each vertex's position one frame earlier.
+	const float              *raw_motion;   // raw_prim_count * 16, or null
 };
 
 // Called by the driver, on the emulation thread.
@@ -160,6 +164,7 @@ int  tcvr_m2_scene_mode(void);
 void tcvr_m2_scene_begin(int width, int height);
 void tcvr_m2_scene_poly(const tcvr_m2_vertex *v, int count, const tcvr_m2_prim *p);
 void tcvr_m2_scene_raw_poly(const tcvr_m2_raw_vertex *v, int count, const tcvr_m2_prim *p);
+void tcvr_m2_scene_raw_poly_m(const tcvr_m2_raw_vertex *v, int count, const tcvr_m2_prim *p, const float *motion16);
 void tcvr_m2_scene_raw_reset(void);   // the board starts a new display list (render_frame_start)
 // The pending raw list is complete, even if EMPTY: the next begin() takes it (Model 1 records the whole list
 // at the end of the frame; an empty list must replace the previous 3D, not keep it).
