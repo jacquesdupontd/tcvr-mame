@@ -2243,6 +2243,14 @@ u32 *model2_state::geo_direct_data(geo_state *geo, u32 opcode, u32 *input)
 	u32  tpa = *input++;     /* Texture Point Address */
 	u32  tha = *input++;     /* Texture Header Address */
 
+	// TCVR: direct polygons (particles, gravel, dust) are sent in camera space by the CPU, with no object and no
+	// matrix: they must not inherit the identity and matrix of the last object (26/09, flashes of the gravel behind
+	// the car: the renderer moved them with another object's motion).
+	raster->tcvr_obj_addr = 0xffffffffu;
+	raster->tcvr_poly_idx = 0;
+	raster->tcvr_obj_serial = 0;
+	raster->tcvr_matrix_ok = false;
+
 	/* push the initial set of data to the 3d rasterizer */
 	model2_3d_push(raster, (opcode >> 23) - 1);
 	model2_3d_push(raster, tpa);
