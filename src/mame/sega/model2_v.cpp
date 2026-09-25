@@ -559,6 +559,7 @@ void model2_state::model2_3d_process_polygon(raster_state *raster, u32 attr)
 		tp.center_x = raster->center[raster->center_sel][0];
 		tp.center_y = raster->center[raster->center_sel][1];
 		tp.zsort = float_to_zval(zvalue, raster->z_adjust);
+		tp.window = raster->cur_window;
 		tcvr_m2_scene_raw_poly(rv, NumVerts, &tp);
 	}
 	if (cull == false)
@@ -761,6 +762,7 @@ void model2_renderer::model2_3d_render(polygon *poly, const rectangle &cliprect)
 		tp.utexx = extra.utexx; tp.utexy = extra.utexy;
 		tp.center_x = poly->center[0];
 		tp.center_y = poly->center[1];
+		tp.window = poly->window;
 		tcvr_m2_scene_poly(tv, tn, &tp);
 	}
 

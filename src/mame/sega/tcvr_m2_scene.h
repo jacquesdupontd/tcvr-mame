@@ -84,6 +84,10 @@ struct tcvr_m2_prim
 	// Direct colour (Sega Model 1, 23/09): bit 24 set = untextured polygon whose final, already lit colour is
 	// 0xRRGGBB in the low bits. The palette / luma chain above is then unused. 0 on Model 2.
 	uint32_t rgb;
+	// Window of the board's display list (25/09, Top Skater): the board draws window by window, the LAST window
+	// first, and the first polygon written on a pixel stays (fill map). A polygon of a later window therefore
+	// covers an earlier window's whatever their depths -- the skater stayed in front of the ramp on the cabinet.
+	uint32_t window;
 };
 
 struct tcvr_m2_frame
