@@ -3136,6 +3136,15 @@ void model2c_state::model2c(machine_config &config)
 	model2_timers(config);
 	model2_screen(config);
 	model2_scsp(config);
+	// TCVR (25/09, Top Skater): the same 500 kHz UART clock as model2o's (a million scheduler slices a second,
+	// profiled: clock_tick 230 ms of each emulated second, the game at 84-89 %). Same half-rate full-pulse clock
+	// (tcvr_uart_pulse_w). Model 2C only: Sega Rally (2A) keeps MAME's clock. debug.tcvr.m2.uartPulse=0 = MAME's.
+	if (tcvr_prop_flag("debug.tcvr.m2.uartPulse", true))
+	{
+		config.device_remove("uart_clock");
+		clock_device &uart_clock(CLOCK(config, "uart_clock", 250000));
+		uart_clock.signal_handler().set(FUNC(model2c_state::tcvr_uart_pulse_w));
+	}
 
 	M2COMM(config, "m2comm");
 }

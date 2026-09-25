@@ -168,6 +168,9 @@ struct tcvr_input_store
 	float steer = 0.5f, gas = 0.0f, brake = 0.0f;
 	bool shift_up = false, shift_down = false, view = false;
 	float gun_y = 0.5f;
+	// Raw controller (25/09, Top Skater): sticks 0..1 (0.5 centre), triggers 0..1, untouched by any driving
+	// profile. A game whose controls are not a car (a skateboard deck) is wired from these by field name.
+	float lx = 0.5f, rx = 0.5f, lt = 0.0f, rt = 0.0f;
 };
 
 tcvr_input_store s_input;
@@ -463,7 +466,7 @@ private:
 					wantPause ? "PAUSED" : "resumed");
 			}
 			bool coin, start, trigger, pedal, shift_up, shift_down, view;
-			float gun_x, gun_y, steer, gas, brake;
+			float gun_x, gun_y, steer, gas, brake, lx, rx, lt, rt;
 			{
 				std::lock_guard lock(s_input.mutex);
 				coin = s_input.coin;
@@ -474,6 +477,7 @@ private:
 				gun_y = s_input.gun_y;
 				steer = s_input.steer; gas = s_input.gas; brake = s_input.brake;
 				shift_up = s_input.shift_up; shift_down = s_input.shift_down; view = s_input.view;
+				lx = s_input.lx; rx = s_input.rx; lt = s_input.lt; rt = s_input.rt;
 			}
 			// Autonomous input injection (16/09): debug.tcvr.in.* override the live
 			// controller so the bench can drive the game headless (coin, start,
@@ -494,6 +498,10 @@ private:
 				pf("debug.tcvr.in.brake", brake);
 				pf("debug.tcvr.in.gunx", gun_x);
 				pf("debug.tcvr.in.guny", gun_y);
+				pf("debug.tcvr.in.lx", lx);
+				pf("debug.tcvr.in.rx", rx);
+				pf("debug.tcvr.in.lt", lt);
+				pf("debug.tcvr.in.rt", rt);
 			}
 			ioport_list const &ports = m_machine->ioport().ports();
 			auto find_port = [&ports](char const *tag) -> ioport_port *
@@ -579,15 +587,31 @@ private:
 						if (fname.rfind("VR", 0) == 0) { field.set_value((view && vrSeen == m_vrIndex) ? 1 : 0); ++vrSeen; continue; }
 						if (fname == "Shift Up")   { field.set_value(shift_up ? 1 : 0); continue; }
 						if (fname == "Shift Down") { field.set_value(shift_down ? 1 : 0); continue; }
-						// Top Skater (25/09): the deck's two axes and the menu selectors, by name
-						if (fname == "Select Left")  { field.set_value(shift_down ? 1 : 0); continue; }
-						if (fname == "Select Right") { field.set_value(shift_up ? 1 : 0); continue; }
-						if (fname == "Slide") {   // right trigger minus left trigger
-							float n = std::clamp(0.5f + 0.5f * (gas - brake), 0.0f, 1.0f);
+						// Top Skater, the skateboard deck (25/09, measured on the PC MAME, deterministic runs):
+						//  Curving = lean the deck; value 0 turns RIGHT, 255 turns LEFT (not flagged reversed in
+						//    MAME) -> left stick, full travel, right = right.
+						//  Slide = swing the deck: slides on the ground, the board's orientation in the air (spins,
+						//    tricks) -> right stick, full travel.
+						//  Jump Tail / Jump Front = stepping on the tail / the nose -> right / left trigger.
+						//  Select Left / Right (menus) -> a flick of the left stick, or the right stick's pulses.
+						// The driving profile (steering range 0.22, triggers as pedals, trigger/A as view) made
+						// spins and one of the jumps impossible and the lean backwards (Guillaume, 25/09).
+						if (fname == "Curving") {
+							float n = std::clamp(1.0f - lx, 0.0f, 1.0f);
 							if (field.analog_reverse()) n = 1.0f - n;
 							field.set_value(field.minval() + ioport_value(n * float(field.maxval() - field.minval())));
 							continue;
 						}
+						if (fname == "Slide") {
+							float n = std::clamp(rx, 0.0f, 1.0f);
+							if (field.analog_reverse()) n = 1.0f - n;
+							field.set_value(field.minval() + ioport_value(n * float(field.maxval() - field.minval())));
+							continue;
+						}
+						if (fname == "Jump Tail")  { field.set_value(rt > 0.5f ? 1 : 0); continue; }
+						if (fname == "Jump Front") { field.set_value(lt > 0.5f ? 1 : 0); continue; }
+						if (fname == "Select Left")  { field.set_value((shift_down || lx < 0.2f) ? 1 : 0); continue; }
+						if (fname == "Select Right") { field.set_value((shift_up || lx > 0.8f) ? 1 : 0); continue; }
 						auto axis = [&field](float n) {
 							n = std::clamp(n, 0.0f, 1.0f);
 							if (field.analog_reverse()) n = 1.0f - n;   // raw override: reverse is not applied by MAME
@@ -789,12 +813,19 @@ extern "C" int tcvr_mame_boot_smoke(const char *driver_id, const char *rom_path,
 		// presents the last image it has, a hundred and twenty times a second,
 		// independently of the arcade clock.
 		{
-			const bool autoskip = property_flag("debug.tcvr.autoframeskip", true);
+			// A board whose scene the headset's GPU draws (Model 1, Model 2, System 22 in scene mode 2): MAME does not
+			// rasterise, so skipping its video saves nothing and only drops scenes -- Top Skater, emulated at 84-94 %,
+			// climbed to frameskip level 8 and showed 18 images a second instead of ~50 (25/09). Off by default there.
+			const char *src = driver_list::driver(driver_index).type.source();
+			const std::string source = src ? src : "";
+			const bool gpuScene = source.find("model1") != std::string::npos || source.find("model2") != std::string::npos ||
+			                      source.find("namcos22") != std::string::npos;
+			const bool autoskip = property_flag("debug.tcvr.autoframeskip", !gpuScene);
 			const int fixedskip = property_int("debug.tcvr.frameskip", 0);
 			options.set_value(OPTION_AUTOFRAMESKIP, autoskip, OPTION_PRIORITY_MAXIMUM);
 			options.set_value(OPTION_FRAMESKIP, fixedskip, OPTION_PRIORITY_MAXIMUM);
 			__android_log_print(ANDROID_LOG_INFO, kLogTag,
-				"TCVR_SOUND autoframeskip=%d frameskip=%d", autoskip ? 1 : 0, fixedskip);
+				"TCVR_SOUND autoframeskip=%d frameskip=%d (GPU scene board=%d)", autoskip ? 1 : 0, fixedskip, gpuScene ? 1 : 0);
 		}
 
 		tcvr_osd osd;
@@ -1305,6 +1336,14 @@ extern "C" void tcvr_mame_set_analog(char const *id, float value)
 		s_input.gas = value;
 	else if (!std::strcmp(id, "brake"))
 		s_input.brake = value;
+	else if (!std::strcmp(id, "lx"))
+		s_input.lx = value;
+	else if (!std::strcmp(id, "rx"))
+		s_input.rx = value;
+	else if (!std::strcmp(id, "lt"))
+		s_input.lt = value;
+	else if (!std::strcmp(id, "rt"))
+		s_input.rt = value;
 }
 
 // ---------------------------------------------------------------------------

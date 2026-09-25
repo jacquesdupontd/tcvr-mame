@@ -50,6 +50,7 @@ private:
 	emu_timer *m_timer_1kHz;
 	TIMER_CALLBACK_MEMBER(timer_irq_cb);
 
+	void tcvr_uart_pulse_w(int state);
 	void output_txd(int state);
 
 	void dsb2_map(address_map &map) ATTR_COLD;

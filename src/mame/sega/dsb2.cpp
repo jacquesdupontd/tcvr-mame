@@ -8,6 +8,9 @@ Sega Digital Sound Board 2
 
 
 #include "emu.h"
+#if defined(__ANDROID__)
+#include <sys/system_properties.h>
+#endif
 #include "dsb2.h"
 #include "machine/clock.h"
 
@@ -66,9 +69,37 @@ void dsb2_device::device_add_mconfig(machine_config &config)
 	m_uart->rxrdy_handler().set_inputline(m_ourcpu, INPUT_LINE_IRQ1);
 	m_uart->txd_handler().set(FUNC(dsb2_device::output_txd));
 
-	clock_device &uart_clock(CLOCK(config, "uart_clock", 500'000)); // 16 times 31.25MHz (standard Sega/MIDI sound data rate)
-	uart_clock.signal_handler().set("uart", FUNC(i8251_device::write_rxc));
-	uart_clock.signal_handler().append("uart", FUNC(i8251_device::write_txc));
+	// TCVR (25/09, Top Skater): this 500 kHz clock toggled a timer a million times a second, each one a scheduler
+	// slice for every CPU of the board (profiled on Quest 3: clock_tick ~200 ms of each emulated second). The i8251
+	// acts on edges only (receive on rising, transmit on falling): a half-rate clock whose every toggle delivers one
+	// full pulse gives it the same pulses per second with half the events -- the fix validated on Virtua Cop's UART.
+	// debug.tcvr.m2.uartPulse=0 restores MAME's clock.
+	bool pulse = true;
+#if defined(__ANDROID__)
+	{
+		char v[PROP_VALUE_MAX] = {};
+		if (__system_property_get("debug.tcvr.m2.uartPulse", v) > 0 && v[0] != '"') pulse = (v[0] != '0');
+	}
+#endif
+	if (pulse)
+	{
+		clock_device &uart_clock(CLOCK(config, "uart_clock", 250'000));
+		uart_clock.signal_handler().set(FUNC(dsb2_device::tcvr_uart_pulse_w));
+	}
+	else
+	{
+		clock_device &uart_clock(CLOCK(config, "uart_clock", 500'000)); // 16 times 31.25MHz (standard Sega/MIDI sound data rate)
+		uart_clock.signal_handler().set("uart", FUNC(i8251_device::write_rxc));
+		uart_clock.signal_handler().append("uart", FUNC(i8251_device::write_txc));
+	}
+}
+
+void dsb2_device::tcvr_uart_pulse_w(int state)
+{
+	m_uart->write_rxc(1);   // rising: receive
+	m_uart->write_txc(1);
+	m_uart->write_rxc(0);
+	m_uart->write_txc(0);   // falling: transmit
 }
 
 
