@@ -174,6 +174,7 @@ struct tcvr_input_store
 };
 
 tcvr_input_store s_input;
+std::atomic<bool> s_bug_pause{false};   // the player's bug button (tcvr_mame_set_digital "bug_pause")
 
 // The machine's own screen. Some boards bring a second one (the model1io2 I/O
 // board of Virtua Cop has a small LCD), and device-tree order can put it first.
@@ -457,7 +458,12 @@ private:
 			}
 			// Freeze the emulation on request, so the same frame can be looked at
 			// under every display filter. A debug tool, read once a frame.
-			const bool wantPause = property_flag("debug.tcvr.pause", false);
+			// debug.tcvr.pauseAt=N (25/09): pause on the Nth emulated frame of this machine. The emulation is
+			// deterministic from a cold start without input, so frame N is the same scene as frame N of the PC MAME
+			// (DBG_POLYFRAME=N): a bug seen in the headset can be compared polygon by polygon.
+			const int pauseAt = property_int("debug.tcvr.pauseAt", 0);
+			const bool wantPause = property_flag("debug.tcvr.pause", false) || (pauseAt > 0 && m_frame_count >= pauseAt) ||
+			                       s_bug_pause.load(std::memory_order_relaxed);   // the player's bug button (both sticks)
 			if (wantPause != m_paused_by_property)
 			{
 				if (wantPause) m_machine->pause(); else m_machine->resume();
@@ -1319,6 +1325,8 @@ extern "C" void tcvr_mame_set_digital(char const *id, bool pressed)
 		s_input.shift_down = pressed;
 	else if (!std::strcmp(id, "view"))
 		s_input.view = pressed;
+	else if (!std::strcmp(id, "bug_pause"))
+		s_bug_pause.store(pressed, std::memory_order_relaxed);
 }
 
 extern "C" void tcvr_mame_set_analog(char const *id, float value)
