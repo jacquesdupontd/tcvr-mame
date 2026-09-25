@@ -2694,6 +2694,12 @@ void model2o_state::model2o(machine_config &config)
 	M2COMM(config, "m2comm");
 }
 
+void model2_state::tcvr_uart_pulse2_w(int state)
+{
+	tcvr_uart_pulse_w(state);
+	tcvr_uart_pulse_w(state);
+}
+
 void model2_state::tcvr_uart_pulse_w(int state)
 {
 	m_uart->write_txc(1);
@@ -3142,8 +3148,10 @@ void model2c_state::model2c(machine_config &config)
 	if (tcvr_prop_flag("debug.tcvr.m2.uartPulse", true))
 	{
 		config.device_remove("uart_clock");
-		clock_device &uart_clock(CLOCK(config, "uart_clock", 250000));
-		uart_clock.signal_handler().set(FUNC(model2c_state::tcvr_uart_pulse_w));
+		// Two full pulses per toggle at a quarter of the rate (25/09): same pulses per second for the i8251, a
+		// quarter of the events (Top Skater at 97-99 % with one pulse per toggle: the music's pitch wavered).
+		clock_device &uart_clock(CLOCK(config, "uart_clock", 125000));
+		uart_clock.signal_handler().set(FUNC(model2c_state::tcvr_uart_pulse2_w));
 	}
 
 	M2COMM(config, "m2comm");

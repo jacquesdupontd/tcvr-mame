@@ -83,7 +83,7 @@ void dsb2_device::device_add_mconfig(machine_config &config)
 #endif
 	if (pulse)
 	{
-		clock_device &uart_clock(CLOCK(config, "uart_clock", 250'000));
+		clock_device &uart_clock(CLOCK(config, "uart_clock", 125'000));   // two full pulses per toggle
 		uart_clock.signal_handler().set(FUNC(dsb2_device::tcvr_uart_pulse_w));
 	}
 	else
@@ -96,10 +96,13 @@ void dsb2_device::device_add_mconfig(machine_config &config)
 
 void dsb2_device::tcvr_uart_pulse_w(int state)
 {
-	m_uart->write_rxc(1);   // rising: receive
-	m_uart->write_txc(1);
-	m_uart->write_rxc(0);
-	m_uart->write_txc(0);   // falling: transmit
+	for (int i = 0; i < 2; i++)
+	{
+		m_uart->write_rxc(1);   // rising: receive
+		m_uart->write_txc(1);
+		m_uart->write_rxc(0);
+		m_uart->write_txc(0);   // falling: transmit
+	}
 }
 
 
