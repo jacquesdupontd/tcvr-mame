@@ -1564,6 +1564,7 @@ struct tcvr_m2_scene_store
 	std::vector<tcvr_m2_prim> raw_pending_prims, raw_last_prims;
 	bool raw_fresh = false;
 	std::atomic<int> enabled{0};
+	bool invalid = false;   // the machine that published the slots is stopping: nothing to acquire
 };
 tcvr_m2_scene_store s_m2_scene;
 }
@@ -1574,8 +1575,11 @@ tcvr_m2_scene_store s_m2_scene;
 // and before it is destroyed: no frame is published any more, the next game starts from an empty store.
 extern "C" void tcvr_m2_scene_invalidate()
 {
+	// Unpublish WITHOUT touching the slots: the render thread may be reading the frame it acquired right now
+	// (25/09: zeroing it in place crashed in the texture memcmp on a null sheet pointer). Acquire returns nothing
+	// until the next machine publishes; the caller then waits for the frame in flight to finish.
 	std::lock_guard lock(s_m2_scene.mutex);
-	for (auto &slot : s_m2_scene.slots) slot.frame = {};
+	s_m2_scene.invalid = true;
 	s_m2_scene.fresh = false;
 	s_m2_scene.recording = false;
 	s_m2_scene.raw_pending_vertices.clear(); s_m2_scene.raw_pending_prims.clear();
@@ -1734,6 +1738,7 @@ extern "C" void tcvr_m2_scene_end(const tcvr_m2_frame *fp)
 	}
 
 	std::lock_guard lock(s_m2_scene.mutex);
+	s_m2_scene.invalid = false;
 	w.frame.sequence = ++s_m2_scene.sequence;
 	std::swap(s_m2_scene.write_idx, s_m2_scene.published_idx);
 	s_m2_scene.fresh = true;
@@ -1742,6 +1747,7 @@ extern "C" void tcvr_m2_scene_end(const tcvr_m2_frame *fp)
 extern "C" const tcvr_m2_frame *tcvr_m2_acquire_scene(void)
 {
 	std::lock_guard lock(s_m2_scene.mutex);
+	if (s_m2_scene.invalid) return nullptr;
 	if (s_m2_scene.fresh) { std::swap(s_m2_scene.read_idx, s_m2_scene.published_idx); s_m2_scene.fresh = false; }
 	auto &r = s_m2_scene.slots[s_m2_scene.read_idx];
 	return r.frame.sequence ? &r.frame : nullptr;
