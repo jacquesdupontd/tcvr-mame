@@ -21,6 +21,9 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <thread>
+extern "C" void tcvr_m2_scene_invalidate();
+extern "C" void tcvr_mame_scene_reset();
 #include <mutex>
 #include <sstream>
 #include <vector>
@@ -802,6 +805,11 @@ extern "C" int tcvr_mame_boot_smoke(const char *driver_id, const char *rom_path,
 		manager.set_machine(&machine);
 		int const result = machine.run(true);
 		s_tcvr_machine.store(nullptr, std::memory_order_release);
+		// The machine still exists here; the scenes it published point into it. Unpublish them, then give the
+		// render thread time to finish the image it may be building from one (a frame is at most ~25 ms).
+		tcvr_m2_scene_invalidate();
+		tcvr_mame_scene_reset();
+		std::this_thread::sleep_for(std::chrono::milliseconds(80));
 		s_tcvr_exit_requested.store(false, std::memory_order_release);
 		int width = 0;
 		int height = 0;
@@ -1511,6 +1519,22 @@ struct tcvr_m2_scene_store
 	std::atomic<int> enabled{0};
 };
 tcvr_m2_scene_store s_m2_scene;
+}
+
+// Game switch (25/09): a published Model 2 frame points IN PLACE at the driver's texture RAM and palettes. Once
+// the machine is destroyed those pointers dangle, and the render thread, still acquiring, read freed memory
+// (SIGSEGV SEGV_MAPERR two seconds into Super GT after Sega Rally). Called when the machine has stopped running
+// and before it is destroyed: no frame is published any more, the next game starts from an empty store.
+extern "C" void tcvr_m2_scene_invalidate()
+{
+	std::lock_guard lock(s_m2_scene.mutex);
+	for (auto &slot : s_m2_scene.slots) slot.frame = {};
+	s_m2_scene.fresh = false;
+	s_m2_scene.recording = false;
+	s_m2_scene.raw_pending_vertices.clear(); s_m2_scene.raw_pending_prims.clear();
+	s_m2_scene.raw_last_vertices.clear(); s_m2_scene.raw_last_prims.clear();
+	s_m2_scene.raw_fresh = false;
+	s_m2_scene.dropped_prims = s_m2_scene.dropped_vertices = 0;
 }
 
 extern "C" void tcvr_m2_scene_enable(int mode)
