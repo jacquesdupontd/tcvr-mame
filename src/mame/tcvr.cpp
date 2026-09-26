@@ -623,6 +623,12 @@ private:
 						if (field.name().rfind("VR", 0) == 0) ++vrCount;
 				if (view && !m_lastViewGeneric && vrCount > 0) m_vrIndex = (m_vrIndex + 1) % vrCount;
 				m_lastViewGeneric = view;
+				// H-pattern gearbox (26/09, Sega Rally: GEAR N / GEAR 1..4, the game latches the last one pressed): the
+				// controller's sequential up/down moves a virtual lever N-1-2-3-4, the matching field held down. Without it
+				// the manual cars could not be chosen nor driven.
+				if (shift_up && !m_lastShiftUpG) m_gearPos = std::min(4, m_gearPos + 1);
+				if (shift_down && !m_lastShiftDownG) m_gearPos = std::max(0, m_gearPos - 1);
+				m_lastShiftUpG = shift_up; m_lastShiftDownG = shift_down;
 				int vrSeen = 0;
 				for (auto const &port : ports)
 					for (ioport_field &field : port.second->fields())
@@ -631,6 +637,11 @@ private:
 						std::string const &fname = field.name();
 						if (fname.rfind("VR", 0) == 0) { field.set_value((view && vrSeen == m_vrIndex) ? 1 : 0); ++vrSeen; continue; }
 						if (fname == "Shift Up")   { field.set_value(shift_up ? 1 : 0); continue; }
+						if (fname.rfind("GEAR ", 0) == 0 && fname.size() == 6) {
+							const int g = fname[5] == 'N' ? 0 : (fname[5] - '0');
+							field.set_value(g == m_gearPos ? 1 : 0);
+							continue;
+						}
 						if (fname == "Shift Down") { field.set_value(shift_down ? 1 : 0); continue; }
 						// Top Skater, the skateboard deck (25/09, measured on the PC MAME, deterministic runs):
 						//  Curving = lean the deck; value 0 turns RIGHT, 255 turns LEFT (not flagged reversed in
@@ -713,6 +724,8 @@ private:
 	bool m_lastPedal = false;
 	bool m_lastViewGeneric = false;
 	int m_vrIndex = 0;
+	int m_gearPos = 1;   // virtual H-pattern lever: 0 = N, 1..4
+	bool m_lastShiftUpG = false, m_lastShiftDownG = false;
 	std::chrono::steady_clock::time_point m_lastRateTime = std::chrono::steady_clock::now();
 };
 
@@ -1218,8 +1231,12 @@ extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size
 			// which this one does: 95.2% was measured during the failure and a
 			// narrower window would simply have frozen the feed-forward at the
 			// last value it happened to accept.
+			// Smoothed (26/09): taken raw, the one-second reading wandered +/-0.6% (frame lock at 60 frames a second:
+			// 1.041-1.054) and the pitch followed it -- a slight tremolo Guillaume heard. An eighth per reading: the
+			// steady rate is reached in a few seconds, the cushion term still corrects any drift.
 			if (measured > 65536 * 85 / 100 && measured < 65536 * 115 / 100)
-				s_audio.rate_measured = measured;
+				s_audio.rate_measured = (s_audio.rate_measured > 0 && std::llabs(measured - s_audio.rate_measured) < 65536 / 20)
+					? s_audio.rate_measured + (measured - s_audio.rate_measured) / 8 : measured;
 		}
 		s_audio.rate_last_write = write_frame;
 		s_audio.rate_output = 0;
