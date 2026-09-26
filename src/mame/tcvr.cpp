@@ -285,10 +285,12 @@ public:
 				s_video.capture_frames = 0;
 			}
 		}
+		// Live (menu VITESSE): back to ORIGINALE, MAME paces on its own clock again.
+		if (!tcvr_framelock_active() && !m_machine->video().throttled()) m_machine->video().set_throttled(true);
 		if (tcvr_framelock_active())
 		{
 			// OPTION_THROTTLE is applied by MAME's UI (ui.cpp), which this headless OSD does not run: the video manager
-			// kept pacing on its own clock (speed 100%, 26/09). Turn it off here, once.
+			// kept pacing on its own clock (speed 100%, 26/09). Turn it off here.
 			if (m_machine->video().throttled()) m_machine->video().set_throttled(false);
 			std::unique_lock<std::mutex> lock(g_tick_mutex);
 			g_tick_cv.wait_for(lock, std::chrono::milliseconds(50), [] { return g_tick_tokens > 0; });
