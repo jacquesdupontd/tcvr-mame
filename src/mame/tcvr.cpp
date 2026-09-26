@@ -738,6 +738,11 @@ extern "C" int tcvr_mame_input_traits()
 	return traits;
 }
 
+// Game speed chosen by the app for the next game start (menu VITESSE, 26/09): 1.0 = the cabinet's own, 1.0431 = a
+// 57.52 Hz board at exactly 60 frames a second (two refreshes each at 120 Hz). debug.tcvr.speed still wins.
+static std::atomic<float> g_tcvr_speed{ 0.0f };
+extern "C" void tcvr_mame_set_speed(float factor) { g_tcvr_speed.store(factor, std::memory_order_release); }
+
 extern "C" void tcvr_mame_request_exit()
 {
 	s_tcvr_exit_requested.store(true, std::memory_order_release);
@@ -805,12 +810,11 @@ extern "C" int tcvr_mame_boot_smoke(const char *driver_id, const char *rom_path,
 		// board at 60 Hz = speed 1.0431). debug.tcvr.speed=<factor>; 1.0 = the cabinet's own speed.
 		{
 			char sp[PROP_VALUE_MAX] = {};
-			if (__system_property_get("debug.tcvr.speed", sp) > 0 && sp[0] >= '0' && sp[0] <= '9') {
-				const float f = float(atof(sp));
-				if (f > 0.5f && f < 2.0f) {
-					options.set_value(OPTION_SPEED, f, OPTION_PRIORITY_MAXIMUM);
-					__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_SPEED emulation speed x%.4f", f);
-				}
+			float f = g_tcvr_speed.load(std::memory_order_acquire);
+			if (__system_property_get("debug.tcvr.speed", sp) > 0 && sp[0] >= '0' && sp[0] <= '9') f = float(atof(sp));
+			if (f > 0.5f && f < 2.0f) {
+				options.set_value(OPTION_SPEED, f, OPTION_PRIORITY_MAXIMUM);
+				__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_SPEED emulation speed x%.4f", f);
 			}
 		}
 		// Let MAME drop a video frame rather than fall behind. The simulation and
