@@ -1236,7 +1236,11 @@ extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size
 	// to target over a few seconds, far too little to be heard as a bend.
 	std::int64_t const lowest = std::int64_t(65536) *
 		s_audio.policy_floor_ppm.load(std::memory_order_acquire) / 1000000;
-	std::int64_t const highest = 65536 + 65536 / 100;
+	// Ceiling: 1% above the producer's MEASURED rate, not above realtime (26/09: in frame lock MAME runs at 60 frames
+	// a second, 4.3% above realtime; capped at +1% the ring overflowed and whole blocks were dropped -- the music
+	// skipped all the time). The pitch then follows the game's speed.
+	std::int64_t const highest = std::max<std::int64_t>(65536 + 65536 / 100,
+		(follow_producer ? s_audio.rate_measured : 65536) + 65536 / 100);
 	if (aim < lowest) aim = lowest;
 	if (aim > highest) aim = highest;
 	// One-pole smoothing, time constant a few hundred callbacks -- a second or so.
