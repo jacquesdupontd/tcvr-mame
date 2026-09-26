@@ -25,6 +25,7 @@
 extern "C" void tcvr_m2_scene_invalidate();
 extern "C" void tcvr_mame_scene_reset();
 #include <mutex>
+#include <condition_variable>
 #include <sstream>
 #include <vector>
 
@@ -185,6 +186,33 @@ static screen_device *tcvr_main_screen(device_t &root)
 	return screen_device_enumerator(root).first();
 }
 
+// Frame lock (26/09): the emulation paced by the HEADSET's frame clock instead of its own. Two free-running clocks at
+// ~60 Hz drift in phase, and while a game frame ends right at the moment the app takes one, the least jitter shows one
+// frame twice and skips the next -- the pairs of hitches Guillaume saw (3-7 frames a second, GPU and CPU idle). Locked,
+// one game frame is made per app frame: no drift by construction. The app ticks once per frame (tcvr_mame_frame_tick);
+// MAME's throttle is off; a missing tick releases the emulation after 50 ms (never frozen).
+static std::atomic<int> g_tcvr_framelock{ 0 };
+static std::mutex g_tick_mutex;
+static std::condition_variable g_tick_cv;
+static int g_tick_tokens = 0;
+extern "C" void tcvr_mame_set_framelock(int on) { g_tcvr_framelock.store(on, std::memory_order_release); }
+extern "C" void tcvr_mame_frame_tick()
+{
+	{
+		std::lock_guard<std::mutex> lock(g_tick_mutex);
+		if (g_tick_tokens < 2) ++g_tick_tokens;   // never more than two frames ahead
+	}
+	g_tick_cv.notify_one();
+}
+// debug.tcvr.framelock (1/0) overrides the app's choice (menu VITESSE : 60 IMAGES).
+static bool tcvr_framelock_active()
+{
+	char v[PROP_VALUE_MAX] = {};
+	static int s_prop = -2;
+	if (s_prop == -2) s_prop = (__system_property_get("debug.tcvr.framelock", v) > 0 && (v[0] == '0' || v[0] == '1')) ? (v[0] - '0') : -1;
+	return s_prop >= 0 ? s_prop != 0 : g_tcvr_framelock.load(std::memory_order_acquire) != 0;
+}
+
 class tcvr_osd final : public osd_interface
 {
 public:
@@ -256,6 +284,15 @@ public:
 				s_video.capture_worst_us = 0;
 				s_video.capture_frames = 0;
 			}
+		}
+		if (tcvr_framelock_active())
+		{
+			// OPTION_THROTTLE is applied by MAME's UI (ui.cpp), which this headless OSD does not run: the video manager
+			// kept pacing on its own clock (speed 100%, 26/09). Turn it off here, once.
+			if (m_machine->video().throttled()) m_machine->video().set_throttled(false);
+			std::unique_lock<std::mutex> lock(g_tick_mutex);
+			g_tick_cv.wait_for(lock, std::chrono::milliseconds(50), [] { return g_tick_tokens > 0; });
+			if (g_tick_tokens > 0) --g_tick_tokens;
 		}
 	}
 	void input_update(bool) override { }
@@ -812,7 +849,10 @@ extern "C" int tcvr_mame_boot_smoke(const char *driver_id, const char *rom_path,
 			char sp[PROP_VALUE_MAX] = {};
 			float f = g_tcvr_speed.load(std::memory_order_acquire);
 			if (__system_property_get("debug.tcvr.speed", sp) > 0 && sp[0] >= '0' && sp[0] <= '9') f = float(atof(sp));
-			if (f > 0.5f && f < 2.0f) {
+			if (tcvr_framelock_active()) {
+				options.set_value(OPTION_THROTTLE, 0, OPTION_PRIORITY_MAXIMUM);   // the headset's clock paces it
+				__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_SPEED frame lock: one game frame per headset frame, throttle off");
+			} else if (f > 0.5f && f < 2.0f) {
 				options.set_value(OPTION_SPEED, f, OPTION_PRIORITY_MAXIMUM);
 				__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_SPEED emulation speed x%.4f", f);
 			}
