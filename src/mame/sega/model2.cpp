@@ -3002,10 +3002,27 @@ void model2b_state::model2b(machine_config &config)
 	model2_timers(config);
 	model2_screen(config);
 	model2_scsp(config);
+	// TCVR (26/09, Super GT 82-93 % in a race): the 500 kHz UART clock again -- profiled, clock_tick ~1M calls and
+	// 150-220 ms of each emulated second, every device re-entered a million times a second. Same quarter-rate clock
+	// with two full pulses per toggle as the 2C (same pulses for the i8251). debug.tcvr.m2.uartPulse=0 = MAME's.
+	if (tcvr_prop_flag("debug.tcvr.m2.uartPulse", true))
+	{
+		config.device_remove("uart_clock");
+		clock_device &uart_clock(CLOCK(config, "uart_clock", 125000));
+		uart_clock.signal_handler().set(FUNC(model2b_state::tcvr_uart_pulse2_w));
+	}
 
 	M2COMM(config, "m2comm");
 
 	SEGA_BILLBOARD(config, m_billboard);
+#if defined(__ANDROID__)
+	// The billboard's Z80 (225-256 ms of each emulated second on Super GT): the billboard is write-only (segabill.h
+	// exposes only write()) and indy500() even moves its port to the drive board, so nothing reaches it -- the same
+	// case as Sega Rally's (see tcvr_cabinet_cpus_requested). debug.tcvr.m2.cabinetCpus=1 puts it back.
+	if (!tcvr_cabinet_cpus_requested())
+		if (cpu_device *const billcpu = subdevice<cpu_device>("billboard:billcpu"))
+			billcpu->set_disable();
+#endif
 
 	config.set_default_layout(layout_segabill);
 }
