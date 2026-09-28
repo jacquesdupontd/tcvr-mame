@@ -43,6 +43,8 @@ struct tcvr_scene_prim
 	uint32_t alpha_enabled; int32_t alpha; uint32_t alpha_pen;                     // alpha = 0xff - extra.alpha
 	// sprite
 	uint32_t sprite_code, flipx, flipy;
+	// System 23: drawn only where the frame's stencil bit is set (namcos23 stencil_lookup, texel u, v before the bank)
+	uint32_t stencil;
 };
 
 struct tcvr_scene_frame
@@ -65,6 +67,8 @@ struct tcvr_scene_frame
 	const uint8_t *pri; uint32_t pri_stride;
 	const uint8_t *gamma_r, *gamma_g, *gamma_b;   // 256 each
 	uint32_t bg_color;                            // 0x00RRGGBB
+	// System 23: the c412 stencil SRAM (u16 words, bit (u & 15) ^ 15 of word ((v << 6) | (u >> 4)) & 0x1ffff)
+	const uint16_t *stencil; uint32_t stencil_words;
 };
 
 struct tcvr_scene_assets
@@ -76,6 +80,17 @@ struct tcvr_scene_assets
 	const uint8_t *sprites;    uint32_t sprite_count;     // 32x32 bytes each, contiguous
 	uint32_t sprite_width, sprite_height;
 	uint32_t pen_count;
+	// Texture address chain of the board, 0 = System 22 values (Namco System 23, 28/09: same tiles and swizzle,
+	// wider tables -- Time Crisis II has 8192 tile rows, 17-bit tile numbers, and does not wrap v before the bank).
+	//   ty   = (int(v) & v_mask) + bank                           S22 0xfff        S23 0xffffffff
+	//   row  = (ty << 4) & row_mask | (int(u) >> 4 & 0xff)         S22 0xfff00      S23 tileid mask (0x1fff00)
+	//   tile = (tilemap[row] | (tileattr[row] & 1) << 16) & tile_mask   S22 0xffff   S23 textile tiles - 1
+	//   shade clamped to shade_max                                S22 none         S23 63
+	uint32_t row_mask, tile_mask, v_mask, shade_max;
+	// 1 = the primitives are published in the board's exact painter order (System 23: render_flush's sort, the
+	// priority bits included): drawn flat WITHOUT a depth test, like the board. 0 = System 22 (recorded order is
+	// not the painter order: depth-tested).
+	uint32_t painter_order;
 };
 
 // Called by the driver (main emulation thread).
@@ -86,6 +101,10 @@ void tcvr_scene_begin(void);
 void tcvr_scene_poly(const tcvr_scene_vertex *v, int count, const tcvr_scene_prim &p);
 void tcvr_scene_sprite(const tcvr_scene_vertex *v, const tcvr_scene_prim &p);
 void tcvr_scene_end(const tcvr_scene_frame &frame_params);   // copies pens/czram/text, publishes
+// A board whose driver state is not a namcos22_state (System 23) hands its static assets over itself, once its
+// tables are built (video_start). The pointers must live as long as the machine; the recorder forgets them when
+// the machine ends (tcvr_mame_scene_reset).
+void tcvr_scene_register_assets(const tcvr_scene_assets &assets);
 
 // Called by the XR side.
 const tcvr_scene_frame *tcvr_mame_acquire_scene(void);      // newest published; valid until next call

@@ -1439,6 +1439,7 @@ struct tcvr_scene_store
 		std::vector<uint8_t> gamma;   // 3 x 256
 		std::vector<uint8_t> pri;     // text mask, width x height
 		std::vector<uint16_t> spotram;
+		std::vector<uint16_t> stencil;
 		tcvr_scene_frame frame{};
 	};
 	std::mutex mutex;
@@ -1452,6 +1453,9 @@ struct tcvr_scene_store
 	std::vector<uint8_t> sprite_atlas;
 	bool assets_ready = false;
 	tcvr_scene_assets assets{};
+	// handed over by a driver that is not a namcos22_state (System 23)
+	std::atomic<bool> registered{false};
+	tcvr_scene_assets registered_assets{};
 };
 tcvr_scene_store s_scene;
 }
@@ -1467,12 +1471,20 @@ extern "C" void tcvr_mame_scene_reset()
 	for (auto &slot : s_scene.slots)
 	{
 		slot.vertices.clear(); slot.prims.clear(); slot.pens.clear(); slot.czram.clear();
-		slot.text.clear(); slot.gamma.clear(); slot.pri.clear(); slot.spotram.clear();
+		slot.text.clear(); slot.gamma.clear(); slot.pri.clear(); slot.spotram.clear(); slot.stencil.clear();
 		slot.frame = {};
 	}
 	s_scene.sprite_atlas.clear();
 	s_scene.assets = {};
 	s_scene.assets_ready = false;
+	s_scene.registered.store(false, std::memory_order_release);
+	s_scene.registered_assets = {};
+}
+
+extern "C" void tcvr_scene_register_assets(const tcvr_scene_assets &assets)
+{
+	s_scene.registered_assets = assets;
+	s_scene.registered.store(true, std::memory_order_release);
 }
 
 extern "C" void tcvr_mame_scene_enable(int enabled)
@@ -1514,6 +1526,7 @@ extern "C" void tcvr_scene_end(const tcvr_scene_frame &fp)
 	w.gamma.resize(768); for (int i = 0; i < 256; i++) { w.gamma[i] = fp.gamma_r[i ^ 3]; w.gamma[256 + i] = fp.gamma_g[i ^ 3]; w.gamma[512 + i] = fp.gamma_b[i ^ 3]; }
 	if (fp.pri) { w.pri.resize(size_t(fp.width) * fp.height); for (int y = 0; y < fp.height; y++) std::memcpy(w.pri.data() + size_t(y) * fp.width, fp.pri + size_t(y) * fp.pri_stride, size_t(fp.width)); }
 	if (fp.spotram) w.spotram.assign(fp.spotram, fp.spotram + 0x400); else w.spotram.clear();
+	if (fp.stencil && fp.stencil_words) w.stencil.assign(fp.stencil, fp.stencil + fp.stencil_words); else w.stencil.clear();
 	w.frame = fp;
 	w.frame.vertices = w.vertices.data(); w.frame.vertex_count = uint32_t(w.vertices.size());
 	w.frame.prims = w.prims.data(); w.frame.prim_count = uint32_t(w.prims.size());
@@ -1522,6 +1535,7 @@ extern "C" void tcvr_scene_end(const tcvr_scene_frame &fp)
 	w.frame.gamma_r = w.gamma.data(); w.frame.gamma_g = w.gamma.data() + 256; w.frame.gamma_b = w.gamma.data() + 512;
 	w.frame.pri = w.pri.empty() ? nullptr : w.pri.data(); w.frame.pri_stride = uint32_t(fp.width);
 	w.frame.spotram = w.spotram.empty() ? nullptr : w.spotram.data();
+	w.frame.stencil = w.stencil.empty() ? nullptr : w.stencil.data(); w.frame.stencil_words = uint32_t(w.stencil.size());
 	std::lock_guard lock(s_scene.mutex);
 	w.frame.sequence = ++s_scene.sequence;
 	std::swap(s_scene.write_idx, s_scene.published_idx);
@@ -1539,6 +1553,7 @@ extern "C" int tcvr_mame_scene_assets(tcvr_scene_assets *out)
 	if (!out) return 0;
 	running_machine *mp = s_tcvr_machine.load(std::memory_order_acquire);
 	if (!mp) return 0;
+	if (s_scene.registered.load(std::memory_order_acquire)) { *out = s_scene.registered_assets; return 1; }
 	running_machine &machine = *mp;
 	if (!s_scene.assets_ready)
 	{

@@ -1234,6 +1234,7 @@ It can also be used with Final Furlong when wired correctly.
 #include <chrono>
 #if defined(__ANDROID__)
 #include <android/log.h>
+#include <sys/system_properties.h>
 #endif
 #include "bus/jvs/namcoio.h"
 #include "bus/rs232/rs232.h"
@@ -1258,6 +1259,7 @@ It can also be used with Final Furlong when wired correctly.
 
 #include "corefloat.h"
 #include "endianness.h"
+#include "../tcvr_scene.h"
 
 #include <cfloat>
 
@@ -1520,6 +1522,7 @@ struct namcos23_render_data
 	s16 vp_size_y;
 	s16 vp_offset_x;
 	s16 vp_offset_y;
+	float vp_fov;   // TCVR: the recorder rebuilds eye space from the projected vertices (tcvr_s23_publish)
 
 	s32 fadecolor_r;
 	s32 fadecolor_g;
@@ -1739,6 +1742,12 @@ public:
 
 	render_t m_render;
 	const u8 *m_sprrom;
+
+	// TCVR scene recorder (tcvr_scene.h): the palette base the pen offsets are counted from, and the static assets.
+	const pen_t *tcvr_pen_base() const { return m_palette->pens(); }
+	std::unique_ptr<u8[]> m_tcvr_tileattr;   // one attribute nibble per tile id (tmhrom unpacked, high nibble first)
+	std::unique_ptr<u8[]> m_tcvr_ayx;        // attribute/y/x -> texel, the System 22 table (flips then swap)
+	bool m_tcvr_stencil_used = false;        // this frame has stencil polygons: publish the c412 SRAM with it
 
 protected:
 	virtual void machine_start() override ATTR_COLD;
@@ -3795,6 +3804,7 @@ void namcos23_state::render_direct_poly(const namcos23_render_entry *re)
 		p->rd.vp_size_y = re->vp_size_y;
 		p->rd.vp_offset_x = re->vp_offset_x;
 		p->rd.vp_offset_y = re->vp_offset_y;
+		p->rd.vp_fov = re->vp_fov;
 
 		p->rd.fogfactor = 0;
 		p->rd.fadefactor = 0xff;
@@ -4003,6 +4013,7 @@ void namcos23_state::render_immediate(const namcos23_render_entry *re)
 		p->rd.vp_size_y = re->vp_size_y;
 		p->rd.vp_offset_x = re->vp_offset_x;
 		p->rd.vp_offset_y = re->vp_offset_y;
+		p->rd.vp_fov = re->vp_fov;
 		p->rd.tbase = 0;
 
 		// global fade
@@ -4306,6 +4317,7 @@ void namcos23_state::render_model(const namcos23_render_entry *re)
 			p->rd.vp_size_y = re->vp_size_y;
 			p->rd.vp_offset_x = re->vp_offset_x;
 			p->rd.vp_offset_y = re->vp_offset_y;
+			p->rd.vp_fov = re->vp_fov;
 
 			p->rd.fogfactor = 0;
 			p->rd.fadefactor = 0xff;
@@ -4369,6 +4381,76 @@ static int render_poly_compare(const void *i1, const void *i2)
 		render_triangle_fan<4>(scissor, render_delegate(&namcos23_renderer::render_scanline<stencil, shade, polyfade, colorfade, blend, polyalpha>, this), 6, p->pv); \
 	break;
 
+// TCVR: one polygon of the sorted list for the GPU, in the System 22 recorder's convention (tcvr_scene.h): eye
+// space with the zoom applied and the perspective divide NOT applied, texture coordinates and brightness minus
+// the 0.5 the System 22 vertex stage adds back. Rebuilt from the projected vertex, exactly:
+//   render_project: pv.x = vp_size_x + fov * X / Z, pv.y = vp_size_y - fov * Y / Z, p0 = 1 / Z, p1..3 = attr / Z;
+//   render_scanline draws pv + (clip_left, clip_top) -- so x = fov X, y = fov Y, z = Z around the centre
+//   (320 + vp_offset_x, 240 - vp_offset_y). Direct polygons stay screen-relative with 1/z in z.
+// k scales x, y and z together: the screen image does not change, the world gets the System 22's units.
+static void tcvr_s23_publish(const namcos23_poly_entry &p, const pen_t *pen_base, float k, u32 *counts, bool diag)
+{
+#if defined(__ANDROID__)
+	if (diag)
+	{   // debug.tcvr.s23.diag=<n>: every polygon of one frame, raw (order = painter order)
+		const namcos23_render_data &d = p.rd;
+		float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
+		for (int i = 0; i < p.vertex_count && i < 16; i++) { x0 = std::min(x0, p.pv[i].x); x1 = std::max(x1, p.pv[i].x); y0 = std::min(y0, p.pv[i].y); y1 = std::max(y1, p.pv[i].y); }
+		__android_log_print(ANDROID_LOG_INFO, "TCVR_S23P", "#%u zkey=%x n=%d dir=%d imm=%d spr=%d vp=%d,%d off=%d,%d fov=%.1f box=%.0f..%.0f,%.0f..%.0f tbase=%x cmode=%u pens=%u sten=%d blend=%d alpha=%d aen=%d apen=%u fade=%d pfade=%d h=%x type=%x",
+			counts[3], p.zkey, p.vertex_count, d.direct, d.immediate, d.sprite, d.vp_size_x, d.vp_size_y, d.vp_offset_x, d.vp_offset_y, double(d.vp_fov),
+			double(x0), double(x1), double(y0), double(y1), d.tbase, d.cmode, unsigned(d.pens - pen_base), d.stencil_enabled, d.blend_enabled, d.alpha, d.alpha_enabled,
+			d.poly_alpha_pen, d.fadefactor, d.pfade_enabled, d.h, d.type);
+	}
+#endif
+	const namcos23_render_data &rd = p.rd;
+	if (rd.sprite) { counts[0]++; return; }                         // Gorgon only (no sprite atlas yet)
+	if (p.vertex_count < 3 || p.vertex_count > 6) return;          // render_flush draws 3 to 6 vertices only
+	const int clip_left = 320 - rd.vp_size_x + rd.vp_offset_x, clip_right = 320 + rd.vp_size_x + rd.vp_offset_x;
+	const int clip_top = 240 - rd.vp_size_y - rd.vp_offset_y, clip_bottom = 240 + rd.vp_size_y - rd.vp_offset_y;
+	tcvr_scene_vertex sv[6];
+	for (int i = 0; i < p.vertex_count; i++)
+	{
+		const poly_vertex &v = p.pv[i];
+		const float w = v.p[0];
+		if (!(w > 0.0f)) return;
+		if (rd.direct)
+			sv[i] = { v.x, -v.y, w, v.p[1] / w - 0.5f, v.p[2] / w - 0.5f, v.p[3] / w - 0.5f };
+		else
+		{
+			const float z = 1.0f / w;
+			sv[i] = { (v.x - rd.vp_size_x) * z * k, (rd.vp_size_y - v.y) * z * k, z * k, v.p[1] / w - 0.5f, v.p[2] / w - 0.5f, v.p[3] / w - 0.5f };
+		}
+	}
+	tcvr_scene_prim sp{};
+	sp.kind = 0; sp.direct = rd.direct ? 1 : 0; sp.zoom = rd.vp_fov;
+	sp.cx = rd.direct ? clip_left : 320 + rd.vp_offset_x;
+	sp.cy = rd.direct ? clip_top : 240 - rd.vp_offset_y;
+	sp.clip_l = std::max(clip_left, 0); sp.clip_r = std::min({clip_right - 1, 639, clip_left + 639});
+	sp.clip_t = std::max(clip_top, 0); sp.clip_b = std::min({clip_bottom - 1, 479, clip_top + 479});
+	const pen_t *pens = rd.pens;
+	int penmask = 0xff, penshift = 0;
+	if (rd.cmode & 4) { pens += 0xec + ((rd.cmode & 8) << 1); penmask = 0x03; penshift = 2 * (~rd.cmode & 3); }
+	else if (rd.cmode & 2) { pens += 0xe0 + ((rd.cmode & 8) << 1); penmask = 0x0f; penshift = 4 * (~rd.cmode & 1); }
+	sp.pens_offset = u32(pens - pen_base); sp.penmask = penmask; sp.penshift = penshift;
+	sp.bn = u32(rd.tbase);
+	sp.texture_enabled = 1; sp.shade_enabled = rd.shade_enabled ? 1 : 0; sp.prioverchar = 2;   // forced to 2 below
+	sp.fog_mode = 0;
+	// fade: render_scanline blends with fadefactor / 0x100 - fadefactor, the System 22 shader with 255 - factor
+	sp.fade_enabled = rd.fadefactor != 0xff; sp.fadefactor = 0xff - rd.fadefactor;
+	sp.fade_r = rd.fadecolor_r; sp.fade_g = rd.fadecolor_g; sp.fade_b = rd.fadecolor_b;
+	sp.pfade_enabled = rd.pfade_enabled; sp.poly_r = rd.polycolor_r; sp.poly_g = rd.polycolor_g; sp.poly_b = rd.polycolor_b;
+	sp.alpha_pen = rd.poly_alpha_pen;
+	if (rd.alpha != 0xff)
+	{
+		sp.alpha_enabled = rd.alpha_enabled; sp.alpha = 0xff - rd.alpha;
+		if (rd.blend_enabled && !rd.alpha_enabled) counts[1]++;   // 50 % on the other pens: not expressible
+	}
+	else if (rd.blend_enabled) { sp.alpha_enabled = 1; sp.alpha = 0x7f; }   // (src + dst) / 2, as render_scanline
+	if (rd.stencil_enabled) { counts[2]++; sp.stencil = 1; }   // mask in the c412 SRAM, published with the frame
+	tcvr_scene_poly(sv, p.vertex_count, sp);
+	counts[3]++;
+}
+
 void namcos23_renderer::render_flush(screen_device &screen, bitmap_rgb32 &bitmap)
 {
 	render_t &render = m_state.m_render;
@@ -4383,9 +4465,41 @@ void namcos23_renderer::render_flush(screen_device &screen, bitmap_rgb32 &bitmap
 
 	const static rectangle scissor(0, 639, 0, 479);
 
+	// TCVR: publish in the painter's order (the sort above). Mode 2: nothing is queued -- and object_data()
+	// is not touched, or its pool (recycled by wait() only after real work) grows every frame.
+	const int tcvr_mode = tcvr_scene_mode();
+	static float s_tcvr_k = 1.0f;
+	static u32 s_tcvr_counts[4] = {0, 0, 0, 0}, s_tcvr_frames = 0;
+	static int s_tcvr_diag_done = 0;
+	bool tcvr_diag = false;
+	if (tcvr_mode > 0 && (s_tcvr_frames % 60) == 0)
+	{
+#if defined(__ANDROID__)
+		char value[PROP_VALUE_MAX] = {};
+		const int diag = (__system_property_get("debug.tcvr.s23.diag", value) > 0) ? atoi(value) : 0;
+		if (diag > 0 && diag != s_tcvr_diag_done) { s_tcvr_diag_done = diag; tcvr_diag = true; }
+		// World units: System 23 eye space is the model's fixed point / 16384 -- metres, by all appearances (the
+		// title screen plane: 3.125 x 2.34 at 3.75). The XR side places 5000 System 22 units at the 2 m screen
+		// distance, 2500 per metre: k = 2500 gives Time Crisis II the scale of Time Crisis. Live: debug.tcvr.s23.k.
+		s_tcvr_k = (__system_property_get("debug.tcvr.s23.k", value) > 0 && value[0] && value[0] != '"') ? float(atof(value)) : 2500.0f;
+		if (!(s_tcvr_k > 0.0f)) s_tcvr_k = 2500.0f;
+		if (s_tcvr_frames)
+			__android_log_print(ANDROID_LOG_INFO, "TCVR_S23", "scene: %u polys/frame published, sprites %u, blend+pen-alpha %u, stencil %u (last 60 frames), k=%.0f",
+				s_tcvr_counts[3] / 60, s_tcvr_counts[0], s_tcvr_counts[1], s_tcvr_counts[2], double(s_tcvr_k));
+#endif
+		s_tcvr_counts[0] = s_tcvr_counts[1] = s_tcvr_counts[2] = s_tcvr_counts[3] = 0;
+	}
+	if (tcvr_mode > 0) s_tcvr_frames++;
+
 	for (int i = 0; i < render.poly_count; i++)
 	{
 		const namcos23_poly_entry *p = render.poly_order[i];
+		if (tcvr_mode > 0)
+		{
+			tcvr_s23_publish(*p, m_state.tcvr_pen_base(), s_tcvr_k, s_tcvr_counts, tcvr_diag);
+			if (p->rd.stencil_enabled) m_state.m_tcvr_stencil_used = true;
+		}
+		if (tcvr_mode >= 2) continue;   // TCVR: the GPU draws it
 		namcos23_render_data& extra = render.polymgr->object_data().next();
 		extra = p->rd;
 		extra.bitmap = &bitmap;
@@ -4866,6 +4980,36 @@ void namcos23_state::video_start()
 	m_render.polymgr = std::make_unique<namcos23_renderer>(*this, m_tmlrom, m_tmhrom, m_texrom, m_c412.sram, m_tileid_mask, m_tile_mask);
 
 	m_ptrom_limit = memregion("pointrom")->bytes()/4;
+
+	// TCVR: the texture store for the GPU (tcvr_scene.h). Same tiles (16x16 bytes) and same swizzle as the
+	// System 22: the attribute nibble of each tile id unpacked (high nibble first, as texture_lookup), and the
+	// System 22 attribute/y/x table -- bit 1 flips y, bit 2 flips x, bit 3 swaps, bit 0 is the tile number's bit 16.
+	{
+		const u32 tileids = (m_tileid_mask | 0xff) + 1;
+		m_tcvr_tileattr = std::make_unique<u8[]>(tileids);
+		for (u32 id = 0; id < tileids; id++)
+			m_tcvr_tileattr[id] = (id & 1) ? (m_tmhrom[id >> 1] & 15) : (m_tmhrom[id >> 1] >> 4);
+		m_tcvr_ayx = std::make_unique<u8[]>(16 * 16 * 16);
+		for (int attr = 0; attr < 16; attr++)
+			for (int y = 0; y < 16; y++)
+				for (int x = 0; x < 16; x++)
+				{
+					int ix = x, iy = y;
+					if (BIT(attr, 2)) ix = 15 - ix;
+					if (BIT(attr, 1)) iy = 15 - iy;
+					if (BIT(attr, 3)) std::swap(ix, iy);
+					m_tcvr_ayx[attr << 8 | y << 4 | x] = (iy << 4) | ix;
+				}
+		tcvr_scene_assets a{};
+		a.tiledata = m_texrom; a.tiledata_bytes = u32(memregion("textile")->bytes());
+		a.tilemap = m_tmlrom; a.tilemap_entries = tileids;
+		a.tileattr = m_tcvr_tileattr.get(); a.tileattr_entries = tileids;
+		a.ayx = m_tcvr_ayx.get(); a.ayx_entries = 16 * 16 * 16;
+		a.pen_count = m_palette->entries();
+		a.row_mask = m_tileid_mask; a.tile_mask = m_tile_mask; a.v_mask = 0xffffffffu; a.shade_max = 63;
+		a.painter_order = 1;   // render_flush publishes after its sort
+		tcvr_scene_register_assets(a);
+	}
 }
 
 void gorgon_state::video_start()
@@ -5027,6 +5171,12 @@ u32 namcos23_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, c
 		return UPDATE_HAS_NOT_CHANGED;
 	}
 
+	// TCVR: the frame for the GPU (tcvr_scene.h), polygons published by render_flush in its sorted order.
+	// Mode 2: MAME builds and sorts them but draws nothing (the XR side draws the scene and the text mix).
+	const int tcvr_mode = tcvr_scene_mode();
+	tcvr_scene_begin();
+	m_tcvr_stencil_used = false;   // render_flush sets it
+
 	screen.priority().fill(0, cliprect);
 
 	// background color
@@ -5050,14 +5200,36 @@ u32 namcos23_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, c
 		apply_text_scroll();
 
 		draw_text_layer(screen);
-		mix_text_layer(screen, bitmap, cliprect, 4);
+		if (tcvr_mode < 2) mix_text_layer(screen, bitmap, cliprect, 4);
 	}
 
 	render_run(screen, bitmap);
 
-	if (m_c404.layer_flags & 4)
+	if ((m_c404.layer_flags & 4) && tcvr_mode < 2)
 	{
 		mix_text_layer(screen, bitmap, cliprect, 6);
+	}
+
+	if (tcvr_mode > 0)
+	{
+		// Text: the mix bitmap and the priority marks left by draw_text_layer (4 on every opaque text pixel; the
+		// polygons all draw with prioverchar 2, so the text always ends on top: mixed at 4, then again at 6).
+		// No gamma, no fog, no spot on this board; the fades and the alpha are the System 22's arithmetic.
+		static u8 s_identity[256];
+		for (int i = 0; i < 256; i++) s_identity[i] = u8(i ^ 3);   // tcvr_scene_end reads gamma[i ^ 3]
+		tcvr_scene_frame f{};
+		f.width = 640; f.height = 480;
+		f.pens = reinterpret_cast<const uint32_t *>(m_palette->pens()); f.pen_count = m_palette->entries();
+		f.text = &m_mix_bitmap->pix(0); f.text_stride = m_mix_bitmap->rowpixels(); f.text_palbase = 0;
+		f.mix_alpha_check12 = m_c404.alpha_check12; f.mix_alpha_check13 = m_c404.alpha_check13;
+		f.mix_alpha_mask = m_c404.alpha_mask; f.mix_alpha_factor = m_c404.alpha_factor;
+		f.mix_fade_enabled = (m_c404.fade_flags & 2) && m_c404.screen_fade_factor; f.mix_fade_factor = 0xff - m_c404.screen_fade_factor;
+		f.mix_fade_r = m_c404.screen_fade_r; f.mix_fade_g = m_c404.screen_fade_g; f.mix_fade_b = m_c404.screen_fade_b;
+		f.pri = &screen.priority().pix(0); f.pri_stride = screen.priority().rowpixels();
+		f.gamma_r = f.gamma_g = f.gamma_b = s_identity;
+		f.bg_color = bgcolor & 0x00ffffff;
+		if (m_tcvr_stencil_used) { f.stencil = m_c412.sram; f.stencil_words = std::size(m_c412.sram); }   // 256 KB, only when used
+		tcvr_scene_end(f);
 	}
 
 	return 0;
