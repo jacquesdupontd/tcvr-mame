@@ -10,6 +10,7 @@
 
 #include "emu.h"
 #include "screen.h"
+#include "tcvr_exact.h"
 
 #include "emuopts.h"
 #include "fileio.h"
@@ -689,6 +690,7 @@ bool screen_device::update_partial(int scanline)
 	u32 flags = 0;
 	{
 		auto profile = g_profiler.start(PROFILER_VIDEO);
+		TCVR_EXACT(1);
 		if (m_video_attributes & VIDEO_VARIABLE_WIDTH)
 		{
 			rectangle scan_clip(clip);
@@ -800,6 +802,7 @@ bool screen_device::update_partial(int vpos, int hpos)
 			if (!clip.empty())
 			{
 				auto profile = g_profiler.start(PROFILER_VIDEO);
+				TCVR_EXACT(1);
 
 				u32 flags = 0;
 				screen_bitmap &curbitmap = m_bitmap[m_curbitmap];
@@ -852,6 +855,7 @@ bool screen_device::update_partial(int vpos, int hpos)
 		if (!clip.empty())
 		{
 			auto profile = g_profiler.start(PROFILER_VIDEO);
+			TCVR_EXACT(1);
 
 			LOG_PARTIAL_UPDATES(("doing scanline partial draw: Y %d X %d-%d\n", clip.bottom(), clip.left(), clip.right()));
 

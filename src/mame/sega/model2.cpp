@@ -129,6 +129,22 @@ static bool tcvr_prop_flag(char const *name, bool fallback)
 	return value[0] == '1';
 }
 
+// debug.tcvr.m2.uartN = number of UART pulses delivered per clock event (1 = MAME's own 500 kHz clock).
+// The 500 kHz clock makes ~1M scheduler slices a second and every slice re-enters every CPU; the i8251 only
+// acts on the edges, so a clock N times slower whose every toggle delivers N pulses gives it the same edges per
+// second with N times fewer events (see the Virtua Cop / Model 2B paths below). Powers of two, 1..16.
+int tcvr_uart_pulses_per_event()
+{
+	char value[PROP_VALUE_MAX] = {};
+	// Default 4 (Nintendo Switch, 29/09): 45% -> 77-82% emulation speed at 1020 MHz; the audio produced is
+	// bit-identical to N=8 and equal to N=1 up to the first sound, then within ~5% (sub-sample note timing).
+	// debug.tcvr.m2.uartN=1 restores MAME's own 500 kHz clock.
+	if (__system_property_get("debug.tcvr.m2.uartN", value) <= 0 || !value[0] || value[0] == '"') return 4;
+	int const n = atoi(value);
+	return (n == 2 || n == 4 || n == 8 || n == 16) ? n : 1;
+}
+int g_tcvr_uart_n = 1;
+
 bool tcvr_cabinet_cpus_requested()
 {
 	// __system_property_get() returns 0 and leaves the buffer empty when the
@@ -2632,9 +2648,21 @@ void model2_state::model2_scsp(machine_config &config)
 	m_uart->rxrdy_handler().set(FUNC(model2_state::sound_ready_w));
 	m_uart->txrdy_handler().set(FUNC(model2_state::sound_ready_w));
 
-	clock_device &uart_clock(CLOCK(config, "uart_clock", 500000)); // 16 times 31.25kHz (standard Sega/MIDI sound data rate)
-	uart_clock.signal_handler().set(m_uart, FUNC(i8251_device::write_txc));
-	uart_clock.signal_handler().append(m_uart, FUNC(i8251_device::write_rxc));
+#if defined(__ANDROID__)
+	g_tcvr_uart_n = tcvr_uart_pulses_per_event();
+#endif
+	if (g_tcvr_uart_n > 1)
+	{
+		// N pulses per toggle at 250 kHz / N: the same 500k pulses a second as MAME's clock, N times fewer events.
+		clock_device &uart_clock(CLOCK(config, "uart_clock", 250000 / g_tcvr_uart_n));
+		uart_clock.signal_handler().set(FUNC(model2_state::tcvr_uart_pulsen_w));
+	}
+	else
+	{
+		clock_device &uart_clock(CLOCK(config, "uart_clock", 500000)); // 16 times 31.25kHz (standard Sega/MIDI sound data rate)
+		uart_clock.signal_handler().set(m_uart, FUNC(i8251_device::write_txc));
+		uart_clock.signal_handler().append(m_uart, FUNC(i8251_device::write_rxc));
+	}
 }
 
 /* original Model 2 */
@@ -2692,6 +2720,12 @@ void model2o_state::model2o(machine_config &config)
 	}
 
 	M2COMM(config, "m2comm");
+}
+
+void model2_state::tcvr_uart_pulsen_w(int)
+{
+	for (int i = 0; i < g_tcvr_uart_n; i++)
+		tcvr_uart_pulse_w(0);
 }
 
 void model2_state::tcvr_uart_pulse2_w(int state)
@@ -2888,6 +2922,11 @@ void model2a_state::manxttdx(machine_config &config)
 void model2a_state::srallyc(machine_config &config)
 {
 	model2a(config);
+#if defined(__ANDROID__)
+	// idle-loop fast-forward of the main CPU's vblank wait (see i960.cpp); debug.tcvr.m2.idleSkip=0 disables it
+	if (tcvr_prop_flag("debug.tcvr.m2.idleSkip", true))
+		m_maincpu->set_tcvr_idle_loop(0x005a379c);
+#endif
 	sj25_0207_01(config);
 
 	sega_315_5649_device &io(*subdevice<sega_315_5649_device>("io"));

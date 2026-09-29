@@ -1061,6 +1061,25 @@ extern "C" void tcvr_mame_audio_stats(std::uint64_t *callbacks, std::uint64_t *u
 // a semitone, held steady rather than jumping -- inaudible, and it never leaves
 // a hole. The ratio is clamped so that a genuinely stalled emulator degrades
 // into an honest underrun rather than into a slowed-down drone.
+// Raw, policy-free read of the audio ring from `cursor` (an oracle: the exact samples MAME produced, in order,
+// with no resampling, stretching or dropping). Returns the frames copied; a cursor that fell more than one ring
+// behind the writer is moved forward and the skipped frames are the caller's loss (count them via the cursor).
+extern "C" std::size_t tcvr_mame_audio_raw(std::int16_t *destination, std::size_t destination_frames, std::uint64_t *cursor)
+{
+	if (!destination || !cursor || !destination_frames) return 0;
+	int const channels = s_audio.channels;
+	std::size_t const capacity = s_audio.samples.size() / std::size_t(channels);
+	std::uint64_t const write_frame = s_audio.write_frame.load(std::memory_order_acquire);
+	if (write_frame > *cursor + capacity) *cursor = write_frame - capacity;
+	std::uint64_t const avail = write_frame - *cursor;
+	std::size_t const n = std::size_t(std::min<std::uint64_t>(avail, destination_frames));
+	for (std::size_t i = 0; i < n; i++)
+		for (int c = 0; c < channels; c++)
+			destination[i * channels + c] = s_audio.samples[((*cursor + i) % capacity) * channels + c];
+	*cursor += n;
+	return n;
+}
+
 extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size_t destination_frames, std::uint64_t *cursor)
 {
 	if (!destination || !cursor || !destination_frames)

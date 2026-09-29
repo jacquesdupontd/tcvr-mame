@@ -98,7 +98,18 @@ protected:
 	// device_disasm_interface overrides
 	virtual std::unique_ptr<util::disasm_interface> create_disassembler() override;
 
+public:
+	// TCVR (Nintendo Switch, 29/09): a known busy-wait loop of the game (`ld` of a status port, count in a
+	// register, `cmpibe` back) can be fast-forwarded exactly, see tcvr_idle_step() in i960.cpp.
+	void set_tcvr_idle_loop(uint32_t ip) { m_tcvr_idle_ip = ip; m_tcvr_idle_state = 0; }
+	uint64_t tcvr_idle_skipped() const { return m_tcvr_idle_skipped; }
+
 private:
+	uint32_t m_tcvr_idle_ip = 0;
+	int m_tcvr_idle_state = 0;            // 0 unverified, 1 verified, -1 refused (code does not match)
+	int m_tcvr_idle_last_ic = 0, m_tcvr_idle_last_d = 0;
+	uint64_t m_tcvr_idle_skipped = 0;
+	void tcvr_idle_step();
 	void burst_stall_save(uint32_t t1, uint32_t t2, int index, int size, bool iswriteop);
 
 	struct {

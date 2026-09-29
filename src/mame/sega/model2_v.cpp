@@ -89,6 +89,7 @@
 *********************************************************************************************************************************/
 
 #include "emu.h"
+#include "tcvr_exact.h"
 #include "model2.h"
 #include "tcvr_m2_scene.h"
 #include "model2rd.ipp"
@@ -3052,13 +3053,18 @@ u32 model2_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, con
 	bitmap.fill(m_palette->pen(0), cliprect);
 	m_sys24_bitmap.fill(0, cliprect);
 
+	{
+	TCVR_EXACT(3);   // tuiles arriere
 	// draw tilemap B as opaque
 	for (int layer = 3; layer >= 2; layer--)
 		m_tiles->draw(screen, m_sys24_bitmap, cliprect, layer << 1, 0, TILEMAP_DRAW_OPAQUE);
 
 	for (int layer = 1; layer >= 0; layer--)
 		m_tiles->draw(screen, m_sys24_bitmap, cliprect, layer << 1, 0, 0);
+	}
 
+	{
+	TCVR_EXACT(4);   // copie vers le bitmap + sauvegarde du fond 2D
 	copybitmap_trans(bitmap, m_sys24_bitmap, 0, 0, 0, 0, cliprect, 0);
 
 	// The frame as it stands before any polygon: this is what a GPU pass has to
@@ -3070,22 +3076,33 @@ u32 model2_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, con
 		            &bitmap.pix(cliprect.top() + y, cliprect.left()),
 		            size_t(cliprect.width()) * 4);
 
+	}
+
+	{
+	TCVR_EXACT(5);   // traitement des polygones (render_polygons, enregistrement de la scene en mode 2)
 	/* tell the rasterizer we're starting a frame */
 	if (m_render_test_mode == true)
 		draw_framebuffer(bitmap, cliprect);
 	else
 		render_polygons(bitmap, cliprect);
+	}
 
+	{
+	TCVR_EXACT(6);   // tuiles avant + copie
 	m_sys24_bitmap.fill(0, cliprect);
 
 	for (int layer = 3; layer >= 0; layer--)
 		m_tiles->draw(screen, m_sys24_bitmap, cliprect, (layer<<1) | 1, 0, 0);
 
 	copybitmap_trans(bitmap, m_sys24_bitmap, 0, 0, 0, 0, cliprect, 0);
+	}
 
 	// m_sys24_bitmap now holds exactly the layer that goes over the polygons,
 	// so this is the only point where a complete scene can be published.
+	{
+	TCVR_EXACT(7);   // publication de la scene
 	tcvr_m2_publish_scene(cliprect);
+	}
 
 #if defined(__ANDROID__)
 	if (tcvr_profile)

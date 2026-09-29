@@ -10,6 +10,7 @@
 
 #include "emu.h"
 #include "sound.h"
+#include "tcvr_exact.h"
 
 #include "audio_effects/aeffect.h"
 #include "resampler.h"
@@ -1992,6 +1993,7 @@ u64 sound_manager::rate_and_time_to_index(attotime time, u32 sample_rate) const
 
 void sound_manager::update(s32)
 {
+	TCVR_EXACT(0);
 	auto profile = g_profiler.start(PROFILER_SOUND);
 
 	mapping_update();

@@ -9,6 +9,7 @@
 ***************************************************************************/
 
 #include "emu.h"
+#include "tcvr_exact.h"
 #include "debugger.h"
 #if defined(__ANDROID__)
 #include <android/log.h>
@@ -54,14 +55,59 @@ struct tcvr_sched_entry {
 	unsigned samples = 0;
 	unsigned calls = 0;
 };
+}
+std::atomic<unsigned long long> g_tcvr_exact_ns[8];
+void (*g_tcvr_pc_report)() = nullptr;
+static bool total_pchist_on() { char v[PROP_VALUE_MAX] = {}; static const bool on = __system_property_get("debug.tcvr.pchist", v) > 0 && v[0] == '1'; return on; }
+bool g_tcvr_exact_on = false;
+namespace {
 bool tcvr_sched_profile_enabled()
 {
 	static const bool enabled = [] {
 		char value[PROP_VALUE_MAX] = {};
-		return __system_property_get("debug.tcvr.schedprofile", value) > 0 && value[0] == '1';
+		bool const on = __system_property_get("debug.tcvr.schedprofile", value) > 0 && value[0] == '1';
+		g_tcvr_exact_on = on;
+		return on;
 	}();
 	return enabled;
 }
+// Where each CPU is when a scheduler slice ends: a histogram of PCs, reported with the sampled figures. A CPU
+// spinning in a wait loop shows up as a handful of addresses holding most of the slices.
+struct tcvr_pc_hist
+{
+	std::array<std::uint32_t, 4096> pc{};
+	std::array<std::uint32_t, 4096> n{};
+	std::uint32_t total = 0;
+	void add(std::uint32_t v)
+	{
+		++total;
+		for (unsigned h = (v * 2654435761u) >> 20, i = 0; i < 4096; i++, h = (h + 1) & 4095) {
+			if (n[h] == 0) { pc[h] = v; n[h] = 1; return; }
+			if (pc[h] == v) { ++n[h]; return; }
+		}
+	}
+	void report(char const *tag)
+	{
+		std::array<unsigned, 8> best{};
+		int top = 0;
+		for (unsigned i = 0; i < 4096; i++) {
+			if (!n[i]) continue;
+			int k = top < 8 ? top++ : 7;
+			if (k == 7 && top == 8 && !(best[7] == 0 || n[i] > n[best[7]])) continue;
+			best[k] = i;
+			for (int j = k; j > 0 && n[best[j]] > n[best[j - 1]]; j--) std::swap(best[j], best[j - 1]);
+		}
+		std::string line;
+		char b[64];
+		for (int j = 0; j < top; j++) {
+			std::snprintf(b, sizeof b, " %08x:%.0f%%", pc[best[j]], 100.0 * n[best[j]] / std::max(1u, total));
+			line += b;
+		}
+		__android_log_print(ANDROID_LOG_INFO, "TCVR_SCHED", "pc %s slices=%u distinct=%d top:%s", tag, total, int(std::count_if(n.begin(), n.end(), [](std::uint32_t v){ return v != 0; })), line.c_str());
+		pc = {}; n = {}; total = 0;
+	}
+};
+
 void tcvr_sched_account(running_machine &machine, device_execute_interface &device,
 		bool sampled, tcvr_sched_clock::time_point start)
 {
@@ -83,6 +129,18 @@ void tcvr_sched_account(running_machine &machine, device_execute_interface &devi
 				++entry.samples;
 			}
 			++entry.calls;
+			{
+				static tcvr_pc_hist hist_main, hist_audio;
+				char const *tag = device.device().tag();
+				static const bool pchist = [] { char v[PROP_VALUE_MAX] = {}; return __system_property_get("debug.tcvr.pchist", v) > 0 && v[0] == '1'; }();
+				if (pchist && (!std::strcmp(tag, ":maincpu") || !std::strcmp(tag, ":audiocpu"))) {
+					device_state_interface *st = nullptr;
+					if (device.device().interface(st)) {
+						(tag[1] == 'm' ? hist_main : hist_audio).add(std::uint32_t(st->pc()));
+					}
+				}
+				g_tcvr_pc_report = [] { hist_main.report("maincpu"); hist_audio.report("audiocpu"); };
+			}
 			break;
 		}
 	}
@@ -100,6 +158,38 @@ void tcvr_sched_account(running_machine &machine, device_execute_interface &devi
 			}
 		}
 		__android_log_print(ANDROID_LOG_INFO, "TCVR_SCHED", "timer_total_calls=%u", tcvr_timer_calls);
+		if (g_tcvr_pc_report && total_pchist_on()) g_tcvr_pc_report();
+		{
+			// debug.tcvr.memdump=<tag>:<hexaddr>:<len>[,...] : bytes of a CPU's program space, logged once
+			static bool dumped = false;
+			char spec[PROP_VALUE_MAX] = {};
+			if (!dumped && __system_property_get("debug.tcvr.memdump", spec) > 0 && spec[0]) {
+				dumped = true;
+				for (auto &entry : entries) {
+					if (!entry.device) continue;
+					char const *tag = entry.device->device().tag();
+					char buf[PROP_VALUE_MAX]; std::snprintf(buf, sizeof buf, "%s", spec);
+					for (char *tok = std::strtok(buf, ","); tok; tok = std::strtok(nullptr, ",")) {
+						char t[32] = {}; unsigned addr = 0, len = 0;
+						if (std::sscanf(tok, "%31[^:]:%x:%u", t, &addr, &len) != 3 || std::strcmp(t, tag + (tag[0] == ':' ? 1 : 0))) continue;
+						auto &sp = entry.device->device().memory().space(AS_PROGRAM);
+						for (unsigned o = 0; o < len; o += 16) {
+							std::string l; char b[8];
+							for (unsigned k = 0; k < 16 && o + k < len; k++) { std::snprintf(b, sizeof b, " %02x", sp.read_byte(addr + o + k)); l += b; }
+							__android_log_print(ANDROID_LOG_INFO, "TCVR_MEM", "%s %08x:%s", tag, addr + o, l.c_str());
+						}
+					}
+				}
+			}
+		}
+		{
+			unsigned long long ex[8];
+			for (int i = 0; i < 8; i++) ex[i] = g_tcvr_exact_ns[i].exchange(0, std::memory_order_relaxed);
+			__android_log_print(ANDROID_LOG_INFO, "TCVR_SCHED", "exact sound_update=%.1fms/s screen_update=%.1fms/s timeslice_total=%.1fms/s",
+				ex[0] / 1e6, ex[1] / 1e6, ex[2] / 1e6);
+			__android_log_print(ANDROID_LOG_INFO, "TCVR_SCHED", "exact screen: tiles_back=%.1f copy_back2d=%.1f polygons=%.1f tiles_front=%.1f publish=%.1fms/s",
+				ex[3] / 1e6, ex[4] / 1e6, ex[5] / 1e6, ex[6] / 1e6, ex[7] / 1e6);
+		}
 		tcvr_timer_calls = 0;
 		for (auto &entry : entries) {
 			if (entry.device && entry.calls) {
@@ -499,6 +589,7 @@ inline void device_scheduler::apply_suspend_changes()
 
 void device_scheduler::timeslice()
 {
+	TCVR_EXACT(2);
 	bool call_debugger = ((machine().debug_flags & DEBUG_FLAG_ENABLED) != 0);
 
 	// build the execution list if we don't have one yet

@@ -1,6 +1,9 @@
 // license:BSD-3-Clause
 // copyright-holders:Farfetch'd, R. Belmont
 #include "emu.h"
+#if defined(__ANDROID__)
+#include <android/log.h>
+#endif
 #include "i960.h"
 #include "i960dis.h"
 
@@ -2203,15 +2206,83 @@ void i960_cpu_device::execute_op(uint32_t opcode)
 
 }
 
+// Exact fast-forward of one known busy-wait loop (Sega Rally, srallyc):
+//
+//   ip+00  ld      0x98000c,g4      status port: a pure function of the frame counter (videoctl_r)
+//   ip+08  addo    g0,1,g0          iteration counter
+//   ip+0c  shro    2,g4,g4
+//   ip+10  and     1,g4,g4
+//   ip+14  cmpibe  g4,g5,ip         loop while the bit is unchanged
+//
+// The frame counter only changes in a vblank callback, i.e. between two scheduler slices, so inside a slice
+// every remaining iteration is identical. Once two consecutive iterations are seen to cost the same number of
+// cycles d, k = (icount-1)/d iterations are skipped at once (icount -= k*d, g0 += k); the last <= d cycles run
+// normally, so the slice ends exactly where it would have. Anything else (different code, an iteration of a
+// different cost, arriving from outside the loop) never skips.
+void i960_cpu_device::tcvr_idle_step()
+{
+	if (m_tcvr_idle_state == 0) {
+		static const uint32_t sig[6] = { 0x90a03000, 0x0098000c, 0x59805010, 0x59a50c02, 0x58a50881, 0x3aa55fec };
+		bool ok = true;
+		uint32_t got[6];
+		for (int i = 0; i < 6; i++) {
+			got[i] = m_cache.read_dword(m_tcvr_idle_ip + 4 * i);
+			if (got[i] != sig[i]) ok = false;
+		}
+#if defined(__ANDROID__)
+		if (!ok)
+			__android_log_print(ANDROID_LOG_INFO, "TCVR_IDLE", "read %08x %08x %08x %08x %08x %08x", got[0], got[1], got[2], got[3], got[4], got[5]);
+#endif
+		m_tcvr_idle_state = ok ? 1 : -1;
+#if defined(__ANDROID__)
+		__android_log_print(ANDROID_LOG_INFO, "TCVR_IDLE", "i960 idle loop at %08x: code %s", m_tcvr_idle_ip, ok ? "verified" : "does NOT match, disabled");
+#endif
+	}
+	if (m_tcvr_idle_state != 1) return;
+	if (m_PIP != m_tcvr_idle_ip + 0x14) {          // arrived by falling in, not by the loop's own branch
+		m_tcvr_idle_last_ic = m_icount;
+		m_tcvr_idle_last_d = 0;
+		return;
+	}
+	int const d = m_tcvr_idle_last_ic - m_icount;   // cycles of the iteration just completed
+	m_tcvr_idle_last_ic = m_icount;
+	if (d > 0 && d == m_tcvr_idle_last_d) {
+		int const k = (m_icount - 1) / d;
+		if (k > 0) {
+			m_icount -= k * d;
+			m_r[16] += uint32_t(k);
+			m_tcvr_idle_skipped += uint64_t(k);
+#if defined(__ANDROID__)
+			{
+				static uint64_t last = 0;
+				if (m_tcvr_idle_skipped - last >= 2000000) {
+					last = m_tcvr_idle_skipped;
+					__android_log_print(ANDROID_LOG_INFO, "TCVR_IDLE", "i960 iterations skipped so far: %llu (last skip k=%d of d=%d cycles)", (unsigned long long)m_tcvr_idle_skipped, k, d);
+				}
+			}
+#endif
+			m_tcvr_idle_last_ic = m_icount;
+		}
+	}
+	m_tcvr_idle_last_d = d;
+}
+
 void i960_cpu_device::execute_run()
 {
 	uint32_t opcode;
+	m_tcvr_idle_last_ic = 0;
+	m_tcvr_idle_last_d = 0;
 
 	// delay checking irqs if we are in burst stall mode
 	if(m_stall_state.burst_mode == false)
 		check_immediate_irqs();
 
 	while(m_icount > 0) {
+		if(m_IP == m_tcvr_idle_ip && m_tcvr_idle_ip != 0 && m_stall_state.burst_mode == false) {
+			tcvr_idle_step();
+			if(m_icount <= 0)
+				break;
+		}
 		m_PIP = m_IP;
 		debugger_instruction_hook(m_IP);
 

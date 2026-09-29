@@ -11,6 +11,9 @@
 // MAME headers
 #include "osdcore.h"
 #include "osdlib.h"
+#if defined(__SWITCH__)
+#include "tcvr/switch_compat/tcvr_switch_forced.h" // setenv, kill: declared by newlib only for other configurations
+#endif
 
 #if !defined(SDLMAME_ANDROID)
 #if defined(SDLMAME_SDL3)
