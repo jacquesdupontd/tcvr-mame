@@ -1577,7 +1577,7 @@ extern "C" int tcvr_mame_scene_assets(tcvr_scene_assets *out)
 	running_machine &machine = *mp;
 	if (!s_scene.assets_ready)
 	{
-#if defined(__SWITCH__)
+#if defined(__SWITCH__) || defined(TCVR_NO_NAMCOS22)
 		namcos22_state *state = nullptr; // the Namco System 22 driver is not part of the Switch build
 #else
 		namcos22_state *state = dynamic_cast<namcos22_state *>(&machine.root_device());
