@@ -1446,6 +1446,7 @@ struct tcvr_scene_store
 	slot slots[3];
 	int write_idx = 0, published_idx = 1, read_idx = 2;
 	bool fresh = false;
+	bool invalid = false;   // the machine that published the slots is stopping: nothing to acquire (29/09)
 	uint64_t sequence = 0;
 	bool recording = false;
 	std::atomic<int> enabled{0};
@@ -1462,19 +1463,15 @@ tcvr_scene_store s_scene;
 
 extern "C" void tcvr_mame_scene_reset()
 {
+	// Unpublish WITHOUT touching the slots (29/09), as the Model 2 recorder has done since 25/09: the render thread may be
+	// reading the frame it acquired RIGHT NOW. Clearing the slots and their roles in place crashed Time Crisis II's game
+	// switches twice -- prims[834] with the list gone (12:39), then the text mask zeroed between its test and its read
+	// (15:56). Acquire returns nothing until the next machine publishes; the slots are reused as they are. The sprite
+	// atlas stays too (a texture upload may be copying it); the assets are only marked to rebuild.
 	std::lock_guard lock(s_scene.mutex);
+	s_scene.invalid = true;
 	s_scene.recording = false;
 	s_scene.fresh = false;
-	s_scene.write_idx = 0;
-	s_scene.published_idx = 1;
-	s_scene.read_idx = 2;
-	for (auto &slot : s_scene.slots)
-	{
-		slot.vertices.clear(); slot.prims.clear(); slot.pens.clear(); slot.czram.clear();
-		slot.text.clear(); slot.gamma.clear(); slot.pri.clear(); slot.spotram.clear(); slot.stencil.clear();
-		slot.frame = {};
-	}
-	s_scene.sprite_atlas.clear();
 	s_scene.assets = {};
 	s_scene.assets_ready = false;
 	s_scene.registered.store(false, std::memory_order_release);
@@ -1540,10 +1537,12 @@ extern "C" void tcvr_scene_end(const tcvr_scene_frame &fp)
 	w.frame.sequence = ++s_scene.sequence;
 	std::swap(s_scene.write_idx, s_scene.published_idx);
 	s_scene.fresh = true;
+	s_scene.invalid = false;   // a running machine publishes again
 }
 extern "C" const tcvr_scene_frame *tcvr_mame_acquire_scene(void)
 {
 	std::lock_guard lock(s_scene.mutex);
+	if (s_scene.invalid) return nullptr;
 	if (s_scene.fresh) { std::swap(s_scene.read_idx, s_scene.published_idx); s_scene.fresh = false; }
 	auto &r = s_scene.slots[s_scene.read_idx];
 	return r.frame.sequence ? &r.frame : nullptr;
