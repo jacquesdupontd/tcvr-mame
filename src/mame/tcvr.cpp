@@ -292,9 +292,32 @@ public:
 			// OPTION_THROTTLE is applied by MAME's UI (ui.cpp), which this headless OSD does not run: the video manager
 			// kept pacing on its own clock (speed 100%, 26/09). Turn it off here.
 			if (m_machine->video().throttled()) m_machine->video().set_throttled(false);
+			// TCVR_FRAMELOCK (29/09, Sega Rally's "mini saccades"): the emulation time of each frame (from the end of the
+			// last wait to here) and the wait, once a second. A frame emulated in more than one headset frame shows the
+			// previous one twice, then the catch-up skips one -- the pairs TCVR_PACING counts. Diagnostic only.
+			using fl_clock = std::chrono::steady_clock;
+			static fl_clock::time_point s_waitEnd{}, s_logAt{};
+			static std::vector<float> s_emu, s_wait;
+			static int s_timeouts = 0;
+			const auto t0 = fl_clock::now();
+			if (s_waitEnd.time_since_epoch().count() != 0) s_emu.push_back(std::chrono::duration<float, std::milli>(t0 - s_waitEnd).count());
 			std::unique_lock<std::mutex> lock(g_tick_mutex);
-			g_tick_cv.wait_for(lock, std::chrono::milliseconds(50), [] { return g_tick_tokens > 0; });
+			const bool got = g_tick_cv.wait_for(lock, std::chrono::milliseconds(50), [] { return g_tick_tokens > 0; });
 			if (g_tick_tokens > 0) --g_tick_tokens;
+			lock.unlock();
+			s_waitEnd = fl_clock::now();
+			s_wait.push_back(std::chrono::duration<float, std::milli>(s_waitEnd - t0).count());
+			if (!got) ++s_timeouts;
+			if (s_waitEnd - s_logAt > std::chrono::seconds(1) && !s_emu.empty()) {
+				s_logAt = s_waitEnd;
+				std::vector<float> e = s_emu, w = s_wait;
+				std::sort(e.begin(), e.end()); std::sort(w.begin(), w.end());
+				int over = 0; for (float x : e) if (x > 16.67f) ++over;
+				__android_log_print(ANDROID_LOG_INFO, kLogTag,
+					"TCVR_FRAMELOCK emulation ms p50=%.1f p90=%.1f max=%.1f, over 16.7 ms=%d/%zu | wait ms p50=%.1f max=%.1f, timeouts=%d",
+					e[e.size() / 2], e[(e.size() * 9) / 10], e.back(), over, e.size(), w[w.size() / 2], w.back(), s_timeouts);
+				s_emu.clear(); s_wait.clear(); s_timeouts = 0;
+			}
 		}
 	}
 	void input_update(bool) override { }
