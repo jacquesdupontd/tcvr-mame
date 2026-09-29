@@ -1238,6 +1238,19 @@ tcvr-android-arm64: tcvr-android-ndk generate $(PROJECTDIR_TCVR)/$(MAKETYPE)-and
 	$(SILENT) $(MAKE) $(MAKEPARAMS) -C $(PROJECTDIR_TCVR)/$(MAKETYPE)-android-arm64 config=$(CONFIG) tcvr
 
 #-------------------------------------------------
+# tcvr-switch - libraries of the native core cross-built with devkitA64 (Nintendo Switch)
+# The final link is done by the homebrew project (libnx), not here.
+#-------------------------------------------------
+
+$(PROJECTDIR_TCVR)/$(MAKETYPE)-linux/Makefile: makefile $(SCRIPTS) $(GENIE)
+	$(SILENT) $(GENIE) $(PARAMS) --gcc=linux-gcc --gcc_version=$(GCC_VERSION) --osd=tcvr --targetos=linux --PLATFORM=arm64 $(MAKETYPE)
+
+.PHONY: tcvr-switch
+tcvr-switch: generate $(PROJECTDIR_TCVR)/$(MAKETYPE)-linux/Makefile
+	$(SILENT) $(MAKE) $(MAKEPARAMS) -C $(PROJECTDIR_TCVR)/$(MAKETYPE)-linux config=$(CONFIG) precompile
+	-$(SILENT) $(MAKE) $(MAKEPARAMS) -k -C $(PROJECTDIR_TCVR)/$(MAKETYPE)-linux config=$(CONFIG) tcvr
+
+#-------------------------------------------------
 # android-x86
 #-------------------------------------------------
 

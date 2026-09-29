@@ -11,6 +11,7 @@
 #include "video.h"
 
 #include "ui/uimain.h"
+#include "../frontend/mame/ui/menuitem.h" // GCC needs the complete type for std::vector<ui::menu_item> (clang did not)
 
 #include <android/log.h>
 
@@ -1557,7 +1558,11 @@ extern "C" int tcvr_mame_scene_assets(tcvr_scene_assets *out)
 	running_machine &machine = *mp;
 	if (!s_scene.assets_ready)
 	{
+#if defined(__SWITCH__)
+		namcos22_state *state = nullptr; // the Namco System 22 driver is not part of the Switch build
+#else
 		namcos22_state *state = dynamic_cast<namcos22_state *>(&machine.root_device());
+#endif
 		if (!state) return 0;
 		memory_region *const textile = machine.root_device().memregion("textile");
 		gfx_element *const gfx = state->tcvr_gfx(2);

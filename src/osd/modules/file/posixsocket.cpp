@@ -1,3 +1,11 @@
+#if defined(__SWITCH__)
+// Nintendo Switch build: no Unix/TCP sockets for MAME's "socket.host:port" file paths (see src/emu/http.cpp).
+#include "posixfile.h"
+bool posix_check_socket_path(std::string const &) noexcept { return false; }
+std::error_condition posix_open_socket(std::string const &, std::uint32_t, osd_file::ptr &, std::uint64_t &) noexcept { return std::errc::not_supported; }
+bool posix_check_domain_path(std::string const &) noexcept { return false; }
+std::error_condition posix_open_domain(std::string const &, std::uint32_t, osd_file::ptr &, std::uint64_t &) noexcept { return std::errc::not_supported; }
+#else
 // license:BSD-3-Clause
 // copyright-holders:Olivier Galibert, R. Belmont, Vas Crabb
 //============================================================
@@ -272,3 +280,4 @@ std::error_condition posix_open_domain(std::string const &path, std::uint32_t op
 
 	return create_socket(sau, sock, openflags, file, filesize);
 }
+#endif // __SWITCH__

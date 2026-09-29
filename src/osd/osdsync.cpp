@@ -113,7 +113,7 @@ int osd_get_num_processors(bool heavy_mt)
 	//
 	// Ask the scheduler what we may actually use.
 	unsigned int threads = std::thread::hardware_concurrency();
-#if defined(__ANDROID__) || defined(__linux__)
+#if (defined(__ANDROID__) || defined(__linux__)) && !defined(__SWITCH__)
 	cpu_set_t allowed;
 	CPU_ZERO(&allowed);
 	// The PROCESS's cores (the main thread's mask, pid), not the calling thread's: the app pins the emulation
@@ -736,7 +736,7 @@ static void *worker_thread_entry(void *param)
 	auto *thread = (work_thread_info *)param;
 	osd_work_queue &queue = thread->queue;
 
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) && !defined(__SWITCH__)
 	{   // A new thread inherits its creator's affinity: the emulation thread's single core. Rasterisers get the
 		// process's cores (24/09, see osd_get_num_processors).
 		cpu_set_t procmask;
