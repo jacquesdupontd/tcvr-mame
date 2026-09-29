@@ -1789,6 +1789,50 @@ extern "C" void tcvr_m2_scene_raw_commit(void)
 {
 	s_m2_scene.raw_fresh = true;
 }
+namespace {
+struct tcvr_m2_dump_cfg { std::string prefix; int first = 0, interval = 0, count = 0, written = 0; uint64_t seen = 0; };
+tcvr_m2_dump_cfg s_m2_dump;
+
+void tcvr_m2_dump_frame(const tcvr_m2_frame &f, char const *path)
+{
+	FILE *out = std::fopen(path, "wb");
+	if (!out) return;
+	auto w32 = [&](uint32_t v) { std::fwrite(&v, 4, 1, out); };
+	auto blob = [&](void const *p, size_t n) { if (p && n) std::fwrite(p, 1, n, out); };
+	std::fwrite("M2SC1\0\0\0", 1, 8, out);
+	w32(uint32_t(f.width)); w32(uint32_t(f.height));
+	w32(f.vertex_count); w32(f.prim_count); w32(uint32_t(sizeof(tcvr_m2_prim)));
+	w32(f.palram_entries); w32(f.colorxlat_entries); w32(f.lumaram_entries); w32(f.gamma_entries);
+	w32(f.textureram_words);
+	w32(uint32_t(f.crtc_xoffset)); w32(uint32_t(f.crtc_yoffset)); w32(f.geometry_unchanged); w32(f.mame_frame);
+	w32(f.back2d ? 1 : 0); w32(f.front2d ? 1 : 0); w32(f.oracle_pixels ? 1 : 0);
+	blob(f.vertices, size_t(f.vertex_count) * sizeof(tcvr_m2_vertex));
+	blob(f.prims, size_t(f.prim_count) * sizeof(tcvr_m2_prim));
+	blob(f.palram, size_t(f.palram_entries) * 2);
+	blob(f.colorxlat, size_t(f.colorxlat_entries) * 2);
+	blob(f.lumaram, f.lumaram_entries);
+	blob(f.gamma, f.gamma_entries);
+	blob(f.textureram[0], size_t(f.textureram_words) * 4);
+	blob(f.textureram[1], size_t(f.textureram_words) * 4);
+	// layers and oracle are stored tightly packed (width x height x 4)
+	auto layer = [&](uint32_t const *p, uint32_t stride) {
+		if (!p) return;
+		for (int y = 0; y < f.height; y++) std::fwrite(p + size_t(y) * stride, 4, size_t(f.width), out);
+	};
+	layer(f.back2d, f.back2d_stride);
+	layer(f.front2d, f.front2d_stride);
+	layer(f.oracle_pixels, f.oracle_stride);
+	std::fclose(out);
+}
+}
+
+extern "C" void tcvr_m2_scene_dump_setup(const char *prefix, int first, int interval, int count)
+{
+	s_m2_dump.prefix = prefix ? prefix : "";
+	s_m2_dump.first = first; s_m2_dump.interval = interval < 1 ? 1 : interval; s_m2_dump.count = count;
+	s_m2_dump.written = 0; s_m2_dump.seen = 0;
+}
+
 extern "C" void tcvr_m2_scene_end(const tcvr_m2_frame *fp)
 {
 	if (!s_m2_scene.recording) return;
@@ -1858,6 +1902,17 @@ extern "C" void tcvr_m2_scene_end(const tcvr_m2_frame *fp)
 		w.frame.dirty[sheet] = w.dirty[sheet].empty() ? nullptr : w.dirty[sheet].data();
 	}
 
+	if (s_m2_dump.count > s_m2_dump.written && w.frame.geometry_unchanged == 0 && w.frame.prim_count > 0)
+	{
+		if (int(s_m2_dump.seen++) >= s_m2_dump.first && ((s_m2_dump.seen - 1 - uint64_t(s_m2_dump.first)) % uint64_t(s_m2_dump.interval)) == 0)
+		{
+			char path[256];
+			std::snprintf(path, sizeof path, "%s%d.bin", s_m2_dump.prefix.c_str(), s_m2_dump.written);
+			tcvr_m2_dump_frame(w.frame, path);
+			__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_DUMP scene %d -> %s (%u polygons)", s_m2_dump.written, path, w.frame.prim_count);
+			s_m2_dump.written++;
+		}
+	}
 	std::lock_guard lock(s_m2_scene.mutex);
 	s_m2_scene.invalid = false;
 	w.frame.sequence = ++s_m2_scene.sequence;

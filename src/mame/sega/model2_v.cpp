@@ -2942,6 +2942,7 @@ void model2_state::tcvr_m2_publish_scene(const rectangle &cliprect)
 		fp.crtc_xoffset = m_crtc_xoffset;
 		fp.crtc_yoffset = m_crtc_yoffset;
 		fp.geometry_unchanged = m_tcvr_scene_geometry_unchanged ? 1u : 0u;
+		if (m_tcvr_bitmap && tcvr_m2_scene_mode() == 1) { fp.oracle_pixels = &m_tcvr_bitmap->pix(0); fp.oracle_stride = u32(m_tcvr_bitmap->rowpixels()); }
 		fp.emu_time = machine().time().as_double();
 		fp.mame_frame = m_screen->frame_number();
 		tcvr_m2_scene_end(&fp);
@@ -3101,7 +3102,9 @@ u32 model2_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, con
 	// so this is the only point where a complete scene can be published.
 	{
 	TCVR_EXACT(7);   // publication de la scene
+	m_tcvr_bitmap = &bitmap;
 	tcvr_m2_publish_scene(cliprect);
+	m_tcvr_bitmap = nullptr;
 	}
 
 #if defined(__ANDROID__)

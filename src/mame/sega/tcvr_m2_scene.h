@@ -152,6 +152,9 @@ struct tcvr_m2_frame
 	// transformed its vertices with (12, transform_point order), the focus (x, y), valid (1/0), spare. The raw
 	// vertices are focus(M * object vertex): M_prev * M_cur^-1 gives each vertex's position one frame earlier.
 	const float              *raw_motion;   // raw_prim_count * 16, or null
+	// Oracle (Nintendo Switch port, 29/09): MAME's OWN finished picture for this very frame (its CPU rasteriser, when
+	// the scene is recorded in mode 1), stride in pixels. Null otherwise. Lets a renderer be compared pixel for pixel.
+	const uint32_t *oracle_pixels; uint32_t oracle_stride;
 };
 
 // Called by the driver, on the emulation thread.
@@ -160,6 +163,9 @@ struct tcvr_m2_frame
 // 9.5-11.0 ms per frame the CPU raster costs on srallyc. Same convention as the
 // System 22 backend (tcvr_scene_mode() >= 2).
 void tcvr_m2_scene_enable(int mode);
+// Debug (Switch): write `count` complete frames (geometry, tables, texture sheets, 2D layers and the oracle picture)
+// to <prefix><n>.bin, one every `interval` published frames, the first after `first` frames. count 0 = off.
+void tcvr_m2_scene_dump_setup(const char *prefix, int first, int interval, int count);
 int  tcvr_m2_scene_mode(void);
 void tcvr_m2_scene_begin(int width, int height);
 void tcvr_m2_scene_poly(const tcvr_m2_vertex *v, int count, const tcvr_m2_prim *p);

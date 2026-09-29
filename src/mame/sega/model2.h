@@ -228,6 +228,7 @@ protected:
 	u32 screen_update(screen_device &screen, bitmap_rgb32 &bitmap, const rectangle &cliprect);
 	void screen_vblank(int state);
 	void sound_ready_w(int state);
+	bitmap_rgb32 *m_tcvr_bitmap = nullptr;   // MAME's finished picture, for the oracle dump
 	void tcvr_uart_pulse_w(int state);
 	void tcvr_uart_pulse2_w(int state);
 	void tcvr_uart_pulsen_w(int state);
