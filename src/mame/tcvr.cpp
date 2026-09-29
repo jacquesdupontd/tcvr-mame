@@ -195,9 +195,11 @@ static std::atomic<int> g_tcvr_framelock{ 0 };
 static std::mutex g_tick_mutex;
 static std::condition_variable g_tick_cv;
 static int g_tick_tokens = 0;
+static std::atomic<uint64_t> g_tick_count{ 0 };   // headset frames ticked so far (the Model 2 queue advances once per tick)
 extern "C" void tcvr_mame_set_framelock(int on) { g_tcvr_framelock.store(on, std::memory_order_release); }
 extern "C" void tcvr_mame_frame_tick()
 {
+	g_tick_count.fetch_add(1, std::memory_order_acq_rel);
 	{
 		std::lock_guard<std::mutex> lock(g_tick_mutex);
 		if (g_tick_tokens < 2) ++g_tick_tokens;   // never more than two frames ahead
@@ -211,6 +213,13 @@ static bool tcvr_framelock_active()
 	static int s_prop = -2;
 	if (s_prop == -2) s_prop = (__system_property_get("debug.tcvr.framelock", v) > 0 && (v[0] == '0' || v[0] == '1')) ? (v[0] - '0') : -1;
 	return s_prop >= 0 ? s_prop != 0 : g_tcvr_framelock.load(std::memory_order_acquire) != 0;
+}
+// debug.tcvr.m2_queue=1: the Model 2 frames queued (shown each once, in order) instead of "the newest wins". Only with the
+// frame lock, whose tick is the queue's clock. Read live (a property read is a few microseconds, at most ~180 a second).
+static bool tcvr_m2_queue_on()
+{
+	char v[PROP_VALUE_MAX] = {};
+	return tcvr_framelock_active() && __system_property_get("debug.tcvr.m2_queue", v) > 0 && v[0] == '1';
 }
 
 class tcvr_osd final : public osd_interface
@@ -1655,8 +1664,15 @@ struct tcvr_m2_scene_store
 		tcvr_m2_frame frame{};
 	};
 	std::mutex mutex;
-	slot slots[3];
+	slot slots[4];
 	int write_idx = 0, published_idx = 1, read_idx = 2;
+	// QUEUE (29/09, Sega Rally's "mini saccades", debug.tcvr.m2_queue=1 with the frame lock): the emulation takes 11-16.5 ms
+	// a frame for a 16.7 ms headset frame, so the phase between a finished frame and the app taking "the newest" made
+	// pairs of one frame shown twice and the next never shown (20 % of the seconds). Queued, the app shows every frame
+	// once, in order: published_idx = the oldest waiting, pending2_idx = the next; one headset frame of latency.
+	int pending2_idx = 3, pending = 0;
+	uint64_t q_last_tick = ~0ull;
+	uint32_t q_held = 0, q_dropped = 0, q_skipped = 0;
 	bool fresh = false;
 	bool recording = false;
 	uint64_t sequence = 0;
@@ -1687,6 +1703,8 @@ extern "C" void tcvr_m2_scene_invalidate()
 	std::lock_guard lock(s_m2_scene.mutex);
 	s_m2_scene.invalid = true;
 	s_m2_scene.fresh = false;
+	s_m2_scene.pending = 0;
+	s_m2_scene.q_last_tick = ~0ull;
 	s_m2_scene.recording = false;
 	s_m2_scene.raw_pending_vertices.clear(); s_m2_scene.raw_pending_prims.clear();
 	s_m2_scene.raw_last_vertices.clear(); s_m2_scene.raw_last_prims.clear();
@@ -1859,15 +1877,63 @@ extern "C" void tcvr_m2_scene_end(const tcvr_m2_frame *fp)
 	std::lock_guard lock(s_m2_scene.mutex);
 	s_m2_scene.invalid = false;
 	w.frame.sequence = ++s_m2_scene.sequence;
-	std::swap(s_m2_scene.write_idx, s_m2_scene.published_idx);
-	s_m2_scene.fresh = true;
+	if (!tcvr_m2_queue_on())
+	{
+		std::swap(s_m2_scene.write_idx, s_m2_scene.published_idx);
+		s_m2_scene.fresh = true;
+		s_m2_scene.pending = 0;
+	}
+	else
+	{
+		auto &S = s_m2_scene;
+		if (S.pending == 0) { std::swap(S.write_idx, S.published_idx); S.pending = 1; }
+		else if (S.pending == 1) { std::swap(S.write_idx, S.pending2_idx); S.pending = 2; }
+		else { const int oldest = S.published_idx; S.published_idx = S.pending2_idx; S.pending2_idx = S.write_idx; S.write_idx = oldest; ++S.q_dropped; }
+		S.fresh = true;
+		static auto s_logAt = std::chrono::steady_clock::now();
+		if (std::chrono::steady_clock::now() - s_logAt > std::chrono::seconds(1))
+		{
+			s_logAt = std::chrono::steady_clock::now();
+			__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_M2QUEUE on: frames held (none waiting) %u, skipped (app missed a slot) %u, dropped (queue full) %u, waiting now %d",
+				S.q_held, S.q_skipped, S.q_dropped, S.pending);
+			S.q_held = S.q_dropped = S.q_skipped = 0;
+		}
+	}
 }
 
 extern "C" const tcvr_m2_frame *tcvr_m2_acquire_scene(void)
 {
 	std::lock_guard lock(s_m2_scene.mutex);
 	if (s_m2_scene.invalid) return nullptr;
-	if (s_m2_scene.fresh) { std::swap(s_m2_scene.read_idx, s_m2_scene.published_idx); s_m2_scene.fresh = false; }
+	if (!tcvr_m2_queue_on())
+	{
+		if (s_m2_scene.fresh) { std::swap(s_m2_scene.read_idx, s_m2_scene.published_idx); s_m2_scene.fresh = false; }
+	}
+	else
+	{
+		// once per headset frame (the app calls this more than once a frame): the next frame in order
+		auto &S = s_m2_scene;
+		const uint64_t tick = g_tick_count.load(std::memory_order_acquire);
+		if (tick != S.q_last_tick)
+		{
+			// one frame per tick elapsed: after a headset slot the app missed, two ticks came at once and the game made two
+			// frames -- taking only one kept a second frame queued (+33 ms) until the next overflow. The skipped one keeps
+			// real time; the miss itself was already a visible hitch.
+			uint64_t n = (S.q_last_tick == ~0ull || tick < S.q_last_tick) ? 1 : std::min<uint64_t>(tick - S.q_last_tick, 2);
+			S.q_last_tick = tick;
+			bool took = false;
+			while (n-- > 0 && S.pending > 0)
+			{
+				if (took) ++S.q_skipped;
+				std::swap(S.read_idx, S.published_idx);
+				if (S.pending == 2) { std::swap(S.published_idx, S.pending2_idx); S.pending = 1; }
+				else S.pending = 0;
+				took = true;
+			}
+			S.fresh = S.pending > 0;
+			if (!took) ++S.q_held;
+		}
+	}
 	auto &r = s_m2_scene.slots[s_m2_scene.read_idx];
 	return r.frame.sequence ? &r.frame : nullptr;
 }
