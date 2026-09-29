@@ -45,6 +45,11 @@ struct tcvr_scene_prim
 	uint32_t sprite_code, flipx, flipy;
 	// System 23: drawn only where the frame's stencil bit is set (namcos23 stencil_lookup, texel u, v before the bank)
 	uint32_t stencil;
+	// Object (29/09): which object of the frame this polygon belongs to -- one id per model the board drew (System 22
+	// blit_polyobject, System 23 render entry), a fresh id per direct or immediate polygon, 0 for sprites. The XR side
+	// decides what goes on the HUD plane per OBJECT, never per polygon, so a model or a burst is never split.
+	uint32_t object;
+	uint32_t immediate;     // System 23: a polygon the CPU sent with its own coordinates (no model, no matrix)
 };
 
 struct tcvr_scene_frame

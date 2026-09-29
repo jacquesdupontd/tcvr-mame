@@ -500,7 +500,7 @@ void namcos22_renderer::poly3d_drawquad(screen_device &screen, bitmap_rgb32 &bit
 		for (int i = 0; i < tcvr_pre_n; i++)
 			sv[i] = { float(tcvr_pre[i].x), float(tcvr_pre[i].y), float(tcvr_pre[i].p[0]), float(tcvr_pre[i].p[1]), float(tcvr_pre[i].p[2]), float(tcvr_pre[i].p[3]) };
 		tcvr_scene_prim sp{};
-		sp.kind = 0; sp.direct = direct ? 1 : 0; sp.zoom = node->data.quad.zoom;
+		sp.kind = 0; sp.direct = direct ? 1 : 0; sp.zoom = node->data.quad.zoom; sp.object = node->data.quad.tcvr_obj;
 		sp.cx = cx; sp.cy = cy;
 		sp.clip_l = m_cliprect.left(); sp.clip_t = m_cliprect.top(); sp.clip_r = m_cliprect.right(); sp.clip_b = m_cliprect.bottom();
 		const pen_t *base = &m_state.m_palette->pen(0);
@@ -950,6 +950,7 @@ void namcos22_state::draw_direct_poly(const u16 *src)
 	*/
 	const u32 zsort = ((src[1] & 0xfff) << 12) | (src[0] & 0xfff);
 	struct namcos22_scenenode *node = m_poly->new_scenenode(machine(), zsort, NAMCOS22_SCENENODE_QUAD);
+	node->data.quad.tcvr_obj = ++m_tcvr_obj_seq;   // TCVR: a direct polygon is its own object
 
 	if (m_is_ss22)
 	{
@@ -1204,6 +1205,7 @@ void namcos22_state::blit_single_quad(u32 color, u32 addr, float m[4][4], int po
 	node->data.quad.cz_type = flags >> 10 & 3;
 	node->data.quad.cz_adjust = m_cz_adjust;
 	node->data.quad.objectflags = m_objectflags;
+	node->data.quad.tcvr_obj = m_tcvr_obj_seq;
 
 	for (int i = 0; i < 4; i++)
 	{
@@ -1343,6 +1345,7 @@ void namcos22_state::blit_quads(int addr, int len, float m[4][4])
 
 void namcos22_state::blit_polyobject(int code, float m[4][4])
 {
+	++m_tcvr_obj_seq;   // TCVR: every quad of this object carries this id
 	// list start address, code 5 is special case for pointram
 	int list_addr;
 	const bool pointram = (code == 0x5);

@@ -95,6 +95,7 @@ struct namcos22_scenenode
 			int objectflags;
 			bool direct;
 			float zoom;              // TCVR: camera zoom applied to v[].x/y
+			u32 tcvr_obj;            // TCVR: object id (tcvr_scene_prim.object)
 			namcos22_polyvertex v[4];
 		} quad;
 
@@ -516,6 +517,7 @@ protected:
 
 	// TCVR asynchronous rasterisation state (see screen_update_namcos22s).
 	bool m_tcvr_async = false;
+	u32 m_tcvr_obj_seq = 0;   // TCVR: object ids (one per blit_polyobject, one per direct polygon)
 	bool m_tcvr_async_decided = false;
 	bool m_tcvr_async_pending = false;
 	bitmap_ind8 m_tcvr_pri[2];

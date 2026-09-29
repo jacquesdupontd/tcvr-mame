@@ -1493,6 +1493,7 @@ struct namcos23_render_data
 	s32 polycolor_g;
 	s32 polycolor_b;
 	u16 model;
+	u32 tcvr_obj;   // TCVR: object id -- one per render entry (tcvr_scene_prim.object)
 	bool direct;
 	bool immediate;
 	bool sprite;
@@ -1748,6 +1749,7 @@ public:
 	std::unique_ptr<u8[]> m_tcvr_tileattr;   // one attribute nibble per tile id (tmhrom unpacked, high nibble first)
 	std::unique_ptr<u8[]> m_tcvr_ayx;        // attribute/y/x -> texel, the System 22 table (flips then swap)
 	bool m_tcvr_stencil_used = false;        // this frame has stencil polygons: publish the c412 SRAM with it
+	u32 m_tcvr_obj_seq = 0;                  // TCVR: object ids, one per render entry
 
 protected:
 	virtual void machine_start() override ATTR_COLD;
@@ -3791,7 +3793,7 @@ void namcos23_state::render_direct_poly(const namcos23_render_entry *re)
 		p->rd.pens = m_palette->pens() + (re->direct.d[2] & 0x7f00);
 		p->rd.direct = true;
 		p->rd.sprite = false;
-		p->rd.immediate = false;
+		p->rd.immediate = false; p->rd.tcvr_obj = m_tcvr_obj_seq;
 		p->rd.shade_enabled = true;
 		p->rd.rgb = 0x00ffffff;
 		p->rd.flags = flags;
@@ -3900,7 +3902,7 @@ void gorgon_state::render_sprite_tile(u32 code_offset, const namcos23_render_ent
 		p->index = render.poly_count;
 
 		p->rd.sprite = true;
-		p->rd.immediate = false;
+		p->rd.immediate = false; p->rd.tcvr_obj = m_tcvr_obj_seq;
 		p->rd.shade_enabled = false;
 		p->rd.sprite_source = gfx->get_data(code % gfx->elements());
 		p->rd.sprite_line_modulo = gfx->rowbytes();
@@ -4005,7 +4007,7 @@ void namcos23_state::render_immediate(const namcos23_render_entry *re)
 		p->rd.rgb = 0x00ffffff;
 		p->rd.direct = false;
 		p->rd.sprite = false;
-		p->rd.immediate = true;
+		p->rd.immediate = true; p->rd.tcvr_obj = m_tcvr_obj_seq;
 		p->rd.shade_enabled = true;
 		p->rd.h = h;
 		p->rd.type = type;
@@ -4305,7 +4307,7 @@ void namcos23_state::render_model(const namcos23_render_entry *re)
 			p->rd.model = re->model.model;
 			p->rd.direct = false;
 			p->rd.sprite = false;
-			p->rd.immediate = false;
+			p->rd.immediate = false; p->rd.tcvr_obj = m_tcvr_obj_seq;
 			p->rd.shade_enabled = true;
 			p->rd.h = h;
 			p->rd.type = type;
@@ -4423,6 +4425,7 @@ static void tcvr_s23_publish(const namcos23_poly_entry &p, const pen_t *pen_base
 	}
 	tcvr_scene_prim sp{};
 	sp.kind = 0; sp.direct = rd.direct ? 1 : 0; sp.zoom = rd.vp_fov;
+	sp.object = rd.tcvr_obj; sp.immediate = rd.immediate ? 1 : 0;
 	sp.cx = rd.direct ? clip_left : 320 + rd.vp_offset_x;
 	sp.cy = rd.direct ? clip_top : 240 - rd.vp_offset_y;
 	sp.clip_l = std::max(clip_left, 0); sp.clip_r = std::min({clip_right - 1, 639, clip_left + 639});
@@ -4696,6 +4699,7 @@ void gorgon_state::dispatch_render_entry(const namcos23_render_entry *re)
 
 void namcos23_state::dispatch_render_entry(const namcos23_render_entry *re)
 {
+	++m_tcvr_obj_seq;   // TCVR: every polygon of this entry carries this id
 	switch (re->type)
 	{
 	case MODEL:
