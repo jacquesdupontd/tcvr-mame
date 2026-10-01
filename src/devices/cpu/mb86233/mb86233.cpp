@@ -712,7 +712,8 @@ void mb86233_device::execute_run()
 #if !defined(__ANDROID__)
 		debugger_instruction_hook(m_ppc);
 #endif
-		u32 opcode = m_cache.read_dword(m_pc++);
+		u32 opcode = (m_prog && m_pc < m_prog_words) ? m_prog[m_pc] : m_cache.read_dword(m_pc);
+		m_pc++;
 
 		switch((opcode >> 26) & 0x3f) {
 		case 0x00: {
@@ -863,7 +864,7 @@ void mb86233_device::execute_run()
 			case 5: {
 				// mov mem (o), mem
 				u32 ea = ea_pre_0(r1);
-				u32 v = m_program.read_dword(ea);
+				u32 v = rd_prog(ea);
 				if(m_stall) goto do_stall;
 				ea_post_0(r1);
 				alu_post_1(alu);
@@ -927,7 +928,7 @@ void mb86233_device::execute_run()
 				case 5: {
 					// mov mem (o), reg
 					u32 ea = ea_pre_0(r1);
-					u32 v = m_program.read_dword(ea);
+					u32 v = rd_prog(ea);
 					if(m_stall) goto do_stall;
 					ea_post_0(r1);
 					alu_post_1(alu);

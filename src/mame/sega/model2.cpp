@@ -496,6 +496,7 @@ void model2_tgp_state::machine_start()
 	model2_state::machine_start();
 
 	m_copro_tgp->tcvr_set_ram(m_copro_tgp_ram_lo, m_copro_tgp_ram_hi);
+	m_copro_tgp->tcvr_set_prog(m_copro_tgp_program, 0x1000);
 
 #if defined(__ANDROID__)
 	if (tcvr_tgp_thread_wanted() && !m_tcvr_tgp)
