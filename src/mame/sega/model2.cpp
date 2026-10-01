@@ -2936,7 +2936,9 @@ void model2_state::model2_scsp(machine_config &config)
 	// coeur exact de MAME. debug.tcvr.m2.musashi=0 revient au coeur exact (A/B de vitesse et d'ecoute).
 	{
 		char v[PROP_VALUE_MAX] = {};
-		const bool musashi = !(__system_property_get("debug.tcvr.m2.musashi", v) > 0 && v[0] == '0');
+		// Defaut : coeur exact. Musashi coupait des sons (coup de piece, voix du copilote : mesure par capture audio, 01/10/2026) ;
+		// debug.tcvr.m2.musashi=1 le reactive.
+		const bool musashi = (__system_property_get("debug.tcvr.m2.musashi", v) > 0 && v[0] == '1');
 		s_tcvr_snd_musashi = musashi;
 		if (musashi) M68000MUSASHI(config, m_audiocpu, 45.1584_MHz_XTAL / 4); else M68000(config, m_audiocpu, 45.1584_MHz_XTAL / 4);
 	}
