@@ -65,6 +65,7 @@ public:
 	// TCVR : execution par un fil dedie (hors ordonnanceur) ; ces deux appels ne servent qu'a lui
 	// acces direct aux deux blocs de RAM de donnees internes (0x000-0x0ff et 0x200-0x3ff, en mots) : evite la repartition de l'espace d'adresses
 	void tcvr_set_ram(u32 *lo, u32 *hi) { m_ram_lo = lo; m_ram_hi = hi; }
+	void tcvr_set_prog(u32 *p, u32 words) { m_prog = p; m_prog_words = words; }
 	void tcvr_reset_state() { device_reset(); }
 	void tcvr_run(int cycles) { m_icount = cycles; execute_run(); }
 
@@ -104,6 +105,12 @@ private:
 
 	int m_icount;
 	u32 *m_ram_lo = nullptr, *m_ram_hi = nullptr;
+	u32 *m_prog = nullptr; u32 m_prog_words = 0;   // RAM du programme : lecture directe (le cache d'espace d'adresses coute un appel virtuel par instruction)
+	inline u32 rd_prog(u32 a)
+	{
+		a &= 0xffff;
+		return (m_prog && a < m_prog_words) ? m_prog[a] : m_program.read_dword(a);
+	}
 	inline u32 rd_data(u32 ea)
 	{
 		if(m_ram_lo) {
