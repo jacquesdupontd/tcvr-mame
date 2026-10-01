@@ -495,6 +495,8 @@ void model2_tgp_state::machine_start()
 {
 	model2_state::machine_start();
 
+	m_copro_tgp->tcvr_set_ram(m_copro_tgp_ram_lo, m_copro_tgp_ram_hi);
+
 #if defined(__ANDROID__)
 	if (tcvr_tgp_thread_wanted() && !m_tcvr_tgp)
 	{
@@ -802,8 +804,8 @@ void model2_tgp_state::copro_tgp_prog_map(address_map &map)
 
 void model2_tgp_state::copro_tgp_data_map(address_map &map)
 {
-	map(0x0000, 0x00ff).ram();
-	map(0x0200, 0x03ff).ram();
+	map(0x0000, 0x00ff).ram().share("copro_tgp_ram_lo");
+	map(0x0200, 0x03ff).ram().share("copro_tgp_ram_hi");
 }
 
 void model2_tgp_state::copro_tgp_io_map(address_map &map)

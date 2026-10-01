@@ -63,6 +63,8 @@ public:
 	void stall() { m_stall = true; }
 
 	// TCVR : execution par un fil dedie (hors ordonnanceur) ; ces deux appels ne servent qu'a lui
+	// acces direct aux deux blocs de RAM de donnees internes (0x000-0x0ff et 0x200-0x3ff, en mots) : evite la repartition de l'espace d'adresses
+	void tcvr_set_ram(u32 *lo, u32 *hi) { m_ram_lo = lo; m_ram_hi = hi; }
 	void tcvr_reset_state() { device_reset(); }
 	void tcvr_run(int cycles) { m_icount = cycles; execute_run(); }
 
@@ -101,6 +103,25 @@ private:
 	memory_access< 4, 2, -2, ENDIANNESS_LITTLE>::specific m_rf;
 
 	int m_icount;
+	u32 *m_ram_lo = nullptr, *m_ram_hi = nullptr;
+	inline u32 rd_data(u32 ea)
+	{
+		if(m_ram_lo) {
+			ea &= 0xffff;
+			if(ea < 0x100) return m_ram_lo[ea];
+			if(ea - 0x200 < 0x200) return m_ram_hi[ea - 0x200];
+		}
+		return m_data.read_dword(ea);
+	}
+	inline void wr_data(u32 ea, u32 v)
+	{
+		if(m_ram_lo) {
+			ea &= 0xffff;
+			if(ea < 0x100) { m_ram_lo[ea] = v; return; }
+			if(ea - 0x200 < 0x200) { m_ram_hi[ea - 0x200] = v; return; }
+		}
+		m_data.write_dword(ea, v);
+	}
 
 	u32 m_st, m_a, m_b, m_d, m_p;
 	u32 m_alu_stmask, m_alu_stset, m_alu_r1, m_alu_r2;
