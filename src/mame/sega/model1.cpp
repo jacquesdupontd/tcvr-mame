@@ -616,19 +616,26 @@ namespace {
 
 int g_tcvr_m1main_uart_n = 1;   // pulses per main-board UART clock event, set when the machine is configured (as model2.cpp)
 
-// Pulses per main-board UART clock event (01/10): debug.tcvr.m2.uartN (1, 2 or 4) first, then the app's profile; 0 =
-// nobody asked, MAME's own clock (the Model 2 boards' rule, model2.cpp tcvr_uart_pulses).
+// Pulses per main-board UART clock event (01/10). The MAIN board takes its own value, at most 1 unless the bench asks
+// (01/10 evening): with 4, Virtua Racing's camera jumped between two positions almost every frame -- in MAME's own
+// CPU-rasterised picture, the car standing still on the grid (bursts of consecutive frames) -- Guillaume's "ça clignotait
+// dans tous les sens ... le sol tombait sous moi". With 1 the same scene is still. The game's frame logic follows the
+// sound link's timing; the sound board's own clock (segam1audio) keeps the app's value. 1 = a 250 kHz clock delivering
+// one full pulse per event: half the events of MAME's 500 kHz toggling clock. debug.tcvr.m1.mainUartN (1, 2, 4) wins.
 int tcvr_m1_uart_pulses()
 {
 	int n = 0;
 	char const *from = "MAME's own clock";
 #if defined(__ANDROID__)
 	char value[PROP_VALUE_MAX] = {};
-	if (__system_property_get("debug.tcvr.m2.uartN", value) > 0 && value[0] && value[0] != '"') {
+	if (__system_property_get("debug.tcvr.m1.mainUartN", value) > 0 && value[0] && value[0] != '"') {
 		int const p = atoi(value);
-		if (p == 1 || p == 2 || p == 4) { n = p; from = "property debug.tcvr.m2.uartN"; }
+		if (p == 1 || p == 2 || p == 4) { n = p; from = "property debug.tcvr.m1.mainUartN"; }
+	} else if (__system_property_get("debug.tcvr.m2.uartN", value) > 0 && value[0] && value[0] != '"') {
+		int const p = atoi(value);
+		if (p == 1 || p == 2 || p == 4) { n = 1; from = "property debug.tcvr.m2.uartN, main board capped at 1"; }
 	} else if (int const a = tcvr_uart_pulses_app(); a == 1 || a == 2 || a == 4) {
-		n = a; from = "the app's profile (UartPulsesFor)";
+		n = 1; from = "the app's profile (UartPulsesFor), main board capped at 1";
 	}
 	__android_log_print(ANDROID_LOG_INFO, "TCVR_UART", "Model 1 main board: %d pulses per clock event (%s)", n, from);
 #endif
@@ -1427,7 +1434,12 @@ void model1_state::init_vr()
 	// with 5500, 30-45 % of the cells were skipped (attract race, PC MAME) -- the pit lane and the garages at a crowded
 	// start (MAME's own picture too), and the far cells ahead, the last of the walk. The game keeps its 30 Hz at any
 	// budget in MAME. debug.tcvr.vr.budget overrides it (bench).
-	int budget = 16500;
+	// 16500 (3x) was set from the attract race (max 14700) and was NOT enough (same evening, Guillaume: "ça clignotait dans
+	// tous les sens ... l'impression que le sol tombait sous moi"): a real race start with the 16 cars around reaches
+	// 17000-17200, at the budget on EVERY 3D frame (TCVR_M1LIST "30 images au budget"); hovering at the budget, a cell or an
+	// object passed one build and not the next -- the bridge deck there and gone (the river under the car every other
+	// frame), the player's car itself. A budget is only safe far above anything measured: 40000.
+	int budget = 40000;
 #if defined(__ANDROID__)
 	char bvalue[PROP_VALUE_MAX] = {};
 	if (__system_property_get("debug.tcvr.vr.budget", bvalue) > 0 && bvalue[0] && bvalue[0] != '"')

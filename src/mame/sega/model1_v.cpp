@@ -1474,18 +1474,22 @@ void model1_state::view_t::set_view_translation(float x, float y)
 // TCVR (01/10): the display list of each frame, summed over a second (TCVR_M1LIST): objects drawn, words used out of the
 // 32768 a bank holds, and how the walk ended (0xf = the game's own end marker). Made for Virtua Racing's 7x7 draw grid:
 // at a crowded race start the pit lane and the garages were missing for 6 s, on MAME's own picture too.
-static void tcvr_list_census(int words, int objs, int end_type)
+// cost / budget: Virtua Racing's polygon budget (5011A0 / 5011B0, see init_vr); a cost at or past the budget means cells
+// were skipped that frame (0 / 0 on the other Model 1 games, whose RAM there means something else).
+static void tcvr_list_census(int words, int objs, int end_type, int cost, int budget)
 {
-	static int frames = 0, objMin = 1 << 30, objMax = 0, wordMax = 0, odd = 0, lastOdd = 0;
+	static int frames = 0, objMin = 1 << 30, objMax = 0, wordMax = 0, odd = 0, lastOdd = 0, costMax = 0, atBudget = 0, lastBudget = 0;
 	++frames;
 	objMin = std::min(objMin, objs); objMax = std::max(objMax, objs); wordMax = std::max(wordMax, words);
 	if (end_type != 0xf) { ++odd; lastOdd = end_type; }
+	costMax = std::max(costMax, cost); lastBudget = budget;
+	if (budget > 0 && cost >= budget) ++atBudget;
 	if (frames < 60) return;
 #if defined(__ANDROID__)
-	__android_log_print(ANDROID_LOG_INFO, "TCVR_MAME", "TCVR_M1LIST %d images | objets %d..%d | liste max %d mots sur 32768 | %d fins sans marqueur (dernier type %d)",
-		frames, objMin, objMax, wordMax, odd, lastOdd);
+	__android_log_print(ANDROID_LOG_INFO, "TCVR_MAME", "TCVR_M1LIST %d images | objets %d..%d | liste max %d mots sur 32768 | %d fins sans marqueur (dernier type %d) | cout max %d budget %d, %d images au budget",
+		frames, objMin, objMax, wordMax, odd, lastOdd, costMax, lastBudget, atBudget);
 #endif
-	frames = 0; objMin = 1 << 30; objMax = 0; wordMax = 0; odd = 0;
+	frames = 0; objMin = 1 << 30; objMax = 0; wordMax = 0; odd = 0; costMax = 0; atBudget = 0;
 }
 
 void model1_state::tgp_render(bitmap_rgb32 &bitmap, const rectangle &cliprect, render_pass pass)
@@ -1653,7 +1657,11 @@ void model1_state::tgp_render(bitmap_rgb32 &bitmap, const rectangle &cliprect, r
 	end:
 		draw_objects(bitmap, cliprect);
 		if (pass == RENDER_BELOW_HUD)
-			tcvr_list_census(list_offset, tcvr_objs, tcvr_end);
+		{
+			address_space &prog = m_maincpu->space(AS_PROGRAM);
+			const bool vr = machine().system().name == std::string_view("vr");
+			tcvr_list_census(list_offset, tcvr_objs, tcvr_end, vr ? int(prog.read_dword(0x5011a0)) : 0, vr ? int(prog.read_dword(0x5011b0)) : 0);
+		}
 	}
 }
 
