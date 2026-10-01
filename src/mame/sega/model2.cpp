@@ -443,7 +443,11 @@ void model2_tgp_state::machine_start()
 
 #if defined(__ANDROID__)
 	if (tcvr_tgp_thread_wanted() && !m_tcvr_tgp)
+	{
 		m_tcvr_tgp = new tcvr_tgp_thread(*m_copro_tgp);
+		// le fil doit etre arrete AVANT la destruction des peripheriques (il lit machine())
+		machine().add_notifier(MACHINE_NOTIFY_EXIT, machine_notify_delegate(&model2_state::tcvr_tgp_destroy, this));
+	}
 #endif
 
 	// debug.tcvr.m2.fifoIn / fifoOut : profondeur des FIFO i960 <-> TGP (8 sur la carte). Plus profond = moins de synchronisations
