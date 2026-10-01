@@ -70,6 +70,7 @@
 */
 
 #include "emu.h"
+#include "cpu/m68000/m68000musashi.h"
 #include "model2.h"
 
 #include "315_5296.h"
@@ -2577,10 +2578,17 @@ void model2_state::model2snd_ctrl(u16 data)
 }
 
 // We assume using the same waitstate weights as Saturn, applied to SCSP area only
+// vrai quand le 68000 son est le coeur Musashi (TCVR) : il n'accepte pas les etats d'attente du plan memoire
+static bool s_tcvr_snd_musashi = false;
 void model2_state::model2_snd(address_map &map)
 {
+	if (s_tcvr_snd_musashi) {
+		map(0x000000, 0x07ffff).ram().share("soundram");
+		map(0x100000, 0x100fff).rw(m_scsp, FUNC(scsp_device::read), FUNC(scsp_device::write));
+	} else {
 	map(0x000000, 0x07ffff).before_delay(NAME([](offs_t) { return 1; })).ram().share("soundram");
 	map(0x100000, 0x100fff).before_delay(NAME([](offs_t) { return 1; })).rw(m_scsp, FUNC(scsp_device::read), FUNC(scsp_device::write));
+	}
 	map(0x400000, 0x400001).w(FUNC(model2_state::model2snd_ctrl));
 	map(0x600000, 0x67ffff).rom().region("audiocpu", 0);
 	map(0x800000, 0x9fffff).rom().region("samples", 0);
@@ -2631,7 +2639,18 @@ void model2_state::model2_screen(machine_config &config)
 
 void model2_state::model2_scsp(machine_config &config)
 {
+#if defined(__ANDROID__)
+	// TCVR : l'ancien coeur Musashi du 68000 son (prefetch et bus non emules au cycle) est nettement plus rapide que le
+	// coeur exact de MAME. debug.tcvr.m2.musashi=0 revient au coeur exact (A/B de vitesse et d'ecoute).
+	{
+		char v[PROP_VALUE_MAX] = {};
+		const bool musashi = !(__system_property_get("debug.tcvr.m2.musashi", v) > 0 && v[0] == '0');
+		s_tcvr_snd_musashi = musashi;
+		if (musashi) M68000MUSASHI(config, m_audiocpu, 45.1584_MHz_XTAL / 4); else M68000(config, m_audiocpu, 45.1584_MHz_XTAL / 4);
+	}
+#else
 	M68000(config, m_audiocpu, 45.1584_MHz_XTAL / 4); // SCSP Clock / 2
+#endif
 	m_audiocpu->set_addrmap(AS_PROGRAM, &model2_state::model2_snd);
 
 	SPEAKER(config, "speaker", 2).front();

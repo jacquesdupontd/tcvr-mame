@@ -1026,9 +1026,15 @@ void device_scheduler::rebuild_execute_list()
 	device_execute_interface *suspend_list = nullptr;
 	device_execute_interface **suspend_tailptr = &suspend_list;
 
+	// TCVR : l'ensemble des peripheriques executables ne change pas une fois la machine demarree ; le parcours de tout
+	// l'arbre de peripheriques a chaque suspension/reprise (TGP en attente de sa FIFO) pesait 3 % du temps.
+	if (m_tcvr_exec_cache.empty())
+		for (device_execute_interface &exec : execute_interface_enumerator(machine().root_device()))
+			m_tcvr_exec_cache.push_back(&exec);
 	// iterate over all devices
-	for (device_execute_interface &exec : execute_interface_enumerator(machine().root_device()))
+	for (device_execute_interface *execp : m_tcvr_exec_cache)
 	{
+		device_execute_interface &exec = *execp;
 		// append to the appropriate list
 		exec.m_nextexec = nullptr;
 		if (exec.m_suspend == 0)

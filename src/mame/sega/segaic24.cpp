@@ -528,9 +528,10 @@ uint16_t segas24_tile_device::char_r(offs_t offset)
 	return char_ram[offset];
 }
 
+unsigned long long g_tcvr_tile_version = 0;   // incremente a chaque ecriture qui CHANGE la RAM des tuiles ou des caracteres
 void segas24_tile_device::tile_w(offs_t offset, uint16_t data, uint16_t mem_mask)
 {
-	COMBINE_DATA(tile_ram.get() + offset);
+	{ uint16_t before = tile_ram[offset]; COMBINE_DATA(tile_ram.get() + offset); if (tile_ram[offset] != before) ++g_tcvr_tile_version; }
 	if(offset < 0x4000)
 		tile_layer[offset >> 12]->mark_tile_dirty(offset & 0xfff);
 }
@@ -539,8 +540,10 @@ void segas24_tile_device::char_w(offs_t offset, uint16_t data, uint16_t mem_mask
 {
 	uint16_t old = char_ram[offset];
 	COMBINE_DATA(char_ram.get() + offset);
-	if(old != char_ram[offset])
+	if(old != char_ram[offset]) {
+		++g_tcvr_tile_version;
 		gfx(char_gfx_index)->mark_dirty(offset / 16);
+	}
 }
 
 void segas24_tile_device::xhout_w(uint16_t data)

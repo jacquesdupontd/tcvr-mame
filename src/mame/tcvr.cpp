@@ -201,7 +201,10 @@ extern "C" void tcvr_mame_frame_tick()
 {
 	{
 		std::lock_guard<std::mutex> lock(g_tick_mutex);
-		if (g_tick_tokens < 2) ++g_tick_tokens;   // never more than two frames ahead
+		// Jusqu'a N images de retard rattrapables (defaut 6 = 100 ms) : une scene lourde isolee n'ecrase plus la moyenne, l'emulation
+		// rattrape ensuite dans les images legeres. debug.tcvr.tokencap=2 redonne l'ancien comportement.
+		static const int cap = [] { char v[PROP_VALUE_MAX] = {}; int n = (__system_property_get("debug.tcvr.tokencap", v) > 0 && v[0]) ? atoi(v) : 6; return n < 1 ? 1 : n > 30 ? 30 : n; }();
+		if (g_tick_tokens < cap) ++g_tick_tokens;
 	}
 	g_tick_cv.notify_one();
 }
@@ -226,6 +229,15 @@ public:
 		if (!screen || screen->renderbitmap().format() != BITMAP_FORMAT_RGB32)
 			return;
 
+		// Sur Switch la scene est dessinee par le GPU (mode 2) : personne ne lit cette copie du framebuffer (760 Ko par image,
+		// 1,7 % du fil d'emulation, mesure par echantillonnage). debug.tcvr.videocopy=1 la remet.
+#if defined(__SWITCH__)
+		static const bool doCapture = property_flag("debug.tcvr.videocopy", false);
+#else
+		constexpr bool doCapture = true;
+#endif
+		if (doCapture)
+		{
 		bitmap_rgb32 &bitmap = screen->renderbitmap().as_rgb32();
 		rectangle const visible = screen->visible_area();
 		// How much of the emulation thread does OUR capture actually take? It
@@ -285,6 +297,7 @@ public:
 				s_video.capture_worst_us = 0;
 				s_video.capture_frames = 0;
 			}
+		}
 		}
 		// Live (menu VITESSE): back to ORIGINALE, MAME paces on its own clock again.
 		if (!tcvr_framelock_active() && !m_machine->video().throttled()) m_machine->video().set_throttled(true);
@@ -548,6 +561,11 @@ private:
 				pf("debug.tcvr.in.rx", rx);
 				pf("debug.tcvr.in.lt", lt);
 				pf("debug.tcvr.in.rt", rt);
+				// debug.tcvr.in.pulse=1 : une pièce (10 images) puis start (10 images) toutes les 300 images, comme un joueur
+				{
+					static unsigned pf2 = 0; static const bool pulse = [] { char b[PROP_VALUE_MAX] = {}; return __system_property_get("debug.tcvr.in.pulse", b) > 0 && b[0] == '1'; }();
+					if (pulse) { ++pf2; const unsigned m = pf2 % 300; coin = (m >= 60 && m < 70); start = (m >= 120 && m < 130); }
+				}
 			}
 			ioport_list const &ports = m_machine->ioport().ports();
 			auto find_port = [&ports](char const *tag) -> ioport_port *
@@ -578,6 +596,12 @@ private:
 						field->set_value(field->minval() + ioport_value(n * float(range)));
 					}
 			};
+			{
+				static unsigned inputTick = 0;
+				if ((++inputTick % 120) == 1)
+					__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_INPUT coin=%d start=%d steer=%.2f gas=%.2f brake=%.2f ports STEER=%p ACCEL=%p IN0=%p",
+						int(coin), int(start), steer, gas, brake, (void *)find_port("STEER"), (void *)find_port("ACCEL"), (void *)find_port("IN0"));
+			}
 			if (find_port("STEER") && find_port("ACCEL"))
 			{
 				// Sega Model 2 driving board. Its I/O tags and START bit do not
@@ -855,7 +879,18 @@ extern "C" int tcvr_mame_boot_smoke(const char *driver_id, const char *rom_path,
 		options.set_value(OPTION_SKIP_GAMEINFO, 1, OPTION_PRIORITY_MAXIMUM);
 		options.set_value(OPTION_READCONFIG, 0, OPTION_PRIORITY_MAXIMUM);
 		options.set_value(OPTION_WRITECONFIG, 0, OPTION_PRIORITY_MAXIMUM);
+#if defined(__SWITCH__)
+		// Switch : le jeu garde ses reglages de borne, ses scores et ses pieces d'une session a l'autre, sur la carte SD.
+		// debug.tcvr.nvram=0 pour repartir d'une borne neuve.
+		{
+			const bool keep = property_flag("debug.tcvr.nvram", true);
+			options.set_value(OPTION_NVRAM_SAVE, keep ? 1 : 0, OPTION_PRIORITY_MAXIMUM);
+			options.set_value(OPTION_NVRAM_DIRECTORY, "/switch/segarally/nvram", OPTION_PRIORITY_MAXIMUM);
+			options.set_value(OPTION_CFG_DIRECTORY, "/switch/segarally/cfg", OPTION_PRIORITY_MAXIMUM);
+		}
+#else
 		options.set_value(OPTION_NVRAM_SAVE, 0, OPTION_PRIORITY_MAXIMUM);
+#endif
 		// debug.tcvr.mame.nodrc=1: interpreters instead of the ARM64 recompilers (to tell a recompiler bug apart)
 		if (property_flag("debug.tcvr.mame.nodrc", false))
 			options.set_value(OPTION_DRC, 0, OPTION_PRIORITY_MAXIMUM);
@@ -1653,6 +1688,7 @@ struct tcvr_m2_scene_store
 		std::vector<uint8_t> gamma;
 		std::vector<uint32_t> back2d;
 		std::vector<uint32_t> front2d;
+		uint64_t layers_rev = 0;
 		std::vector<uint32_t> dirty[2];
 		tcvr_m2_frame frame{};
 	};
@@ -1713,13 +1749,15 @@ extern "C" int tcvr_m2_scene_mode(void)
 	return s_m2_scene.enabled.load(std::memory_order_relaxed);
 }
 
+static std::atomic<int> s_m2_raw_off{0};
+extern "C" void tcvr_m2_scene_raw_off(int off) { s_m2_raw_off.store(off, std::memory_order_release); }
 extern "C" void tcvr_m2_scene_begin(int width, int height)
 {
 	if (!s_m2_scene.enabled.load(std::memory_order_relaxed)) { s_m2_scene.recording = false; return; }
 	auto &w = s_m2_scene.slots[s_m2_scene.write_idx];
 	w.vertices.clear();
 	w.prims.clear();
-	if (s_m2_scene.raw_fresh)
+	if (!s_m2_raw_off.load(std::memory_order_acquire) && s_m2_scene.raw_fresh)
 	{
 		s_m2_scene.raw_last_vertices.swap(s_m2_scene.raw_pending_vertices);
 		s_m2_scene.raw_last_prims.swap(s_m2_scene.raw_pending_prims);
@@ -1729,9 +1767,11 @@ extern "C" void tcvr_m2_scene_begin(int width, int height)
 		s_m2_scene.raw_pending_motion.clear();
 		s_m2_scene.raw_fresh = false;
 	}
-	w.raw_vertices = s_m2_scene.raw_last_vertices;
-	w.raw_prims = s_m2_scene.raw_last_prims;
-	w.raw_motion = s_m2_scene.raw_last_motion;
+	if (!s_m2_raw_off.load(std::memory_order_acquire)) {
+		w.raw_vertices = s_m2_scene.raw_last_vertices;
+		w.raw_prims = s_m2_scene.raw_last_prims;
+		w.raw_motion = s_m2_scene.raw_last_motion;
+	} else { w.raw_vertices.clear(); w.raw_prims.clear(); w.raw_motion.clear(); }
 	w.frame.width = width;
 	w.frame.height = height;
 	s_m2_scene.dropped_prims = 0;
@@ -1781,12 +1821,14 @@ extern "C" void tcvr_m2_scene_raw_poly(const tcvr_m2_raw_vertex *v, int count, c
 }
 extern "C" void tcvr_m2_scene_raw_reset(void)
 {
+	if (s_m2_raw_off.load(std::memory_order_acquire)) return;
 	s_m2_scene.raw_pending_vertices.clear();
 	s_m2_scene.raw_pending_prims.clear();
 	s_m2_scene.raw_pending_motion.clear();
 }
 extern "C" void tcvr_m2_scene_raw_commit(void)
 {
+	if (s_m2_raw_off.load(std::memory_order_acquire)) return;
 	s_m2_scene.raw_fresh = true;
 }
 namespace {
@@ -1868,6 +1910,17 @@ extern "C" void tcvr_m2_scene_end(const tcvr_m2_frame *fp)
 	// tex0_w/tex1_w, so a consumer reads them in place and uses the dirty mask
 	// to know what moved. The masks ARE copied, because the driver clears them
 	// as soon as this frame is published.
+	// Layers unchanged since this slot last held them (same revision, same size): keep its copy, skip the two ~760 KB copies.
+	const size_t layer_px = size_t(fp->width) * size_t(fp->height);
+	const bool layers_same = fp->layers_revision != 0 && w.layers_rev == fp->layers_revision && layer_px != 0 &&
+	                         w.back2d.size() == layer_px && w.front2d.size() == layer_px;
+	if (layers_same)
+	{
+		w.frame.back2d = w.back2d.data();   w.frame.back2d_stride = uint32_t(fp->width);
+		w.frame.front2d = w.front2d.data(); w.frame.front2d_stride = uint32_t(fp->width);
+	}
+	else
+	{
 	if (fp->back2d && fp->back2d_stride && fp->width > 0 && fp->height > 0)
 	{
 		w.back2d.resize(size_t(fp->width) * size_t(fp->height));
@@ -1892,6 +1945,8 @@ extern "C" void tcvr_m2_scene_end(const tcvr_m2_frame *fp)
 		w.frame.front2d_stride = uint32_t(fp->width);
 	}
 	else { w.front2d.clear(); w.frame.front2d = nullptr; w.frame.front2d_stride = 0; }
+		w.layers_rev = fp->layers_revision;
+	}
 
 	for (int sheet = 0; sheet < 2; sheet++)
 	{

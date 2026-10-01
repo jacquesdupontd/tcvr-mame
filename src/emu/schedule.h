@@ -151,6 +151,7 @@ private:
 	// internal state
 	running_machine &           m_machine;                  // reference to our machine
 	device_execute_interface *  m_executing_device;         // pointer to currently executing device
+	std::vector<device_execute_interface *> m_tcvr_exec_cache;   // TCVR : voir rebuild_execute_list
 	device_execute_interface *  m_execute_list;             // list of devices to be executed
 	attotime                    m_basetime;                 // global basetime; everything moves forward from here
 

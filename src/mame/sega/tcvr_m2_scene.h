@@ -124,6 +124,8 @@ struct tcvr_m2_frame
 	// CPU where it does not, with incoherent seams between them.
 	const uint32_t *back2d;  uint32_t back2d_stride;
 	const uint32_t *front2d; uint32_t front2d_stride;
+	// Changes whenever the content of back2d or front2d may have changed (0 = unknown: always treat as changed).
+	uint64_t layers_revision;
 	const uint32_t *textureram[2]; uint32_t textureram_words;
 	const uint32_t *dirty[2];      uint32_t dirty_words, dirty_blocks, dirty_block_words;
 	uint64_t dirty_generation;
@@ -171,6 +173,7 @@ void tcvr_m2_scene_begin(int width, int height);
 void tcvr_m2_scene_poly(const tcvr_m2_vertex *v, int count, const tcvr_m2_prim *p);
 void tcvr_m2_scene_raw_poly(const tcvr_m2_raw_vertex *v, int count, const tcvr_m2_prim *p);
 void tcvr_m2_scene_raw_poly_m(const tcvr_m2_raw_vertex *v, int count, const tcvr_m2_prim *p, const float *motion16);
+void tcvr_m2_scene_raw_off(int off);  // 1: the pre-clip stream is not recorded at all (the Switch's flat window never reads it)
 void tcvr_m2_scene_raw_reset(void);   // the board starts a new display list (render_frame_start)
 // The pending raw list is complete, even if EMPTY: the next begin() takes it (Model 1 records the whole list
 // at the end of the frame; an empty list must replace the previous 3D, not keep it).
