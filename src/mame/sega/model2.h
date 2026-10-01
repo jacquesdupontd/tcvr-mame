@@ -335,6 +335,7 @@ private:
 protected:
 	class tcvr_tgp_thread;                  // TGP (MB86234) execute par un fil dedie, voir model2.cpp
 	tcvr_tgp_thread *m_tcvr_tgp = nullptr;
+public:
 	void tcvr_tgp_destroy();
 private:
 	std::unique_ptr<raster_state> m_raster_alt;
