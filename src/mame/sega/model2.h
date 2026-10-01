@@ -402,7 +402,9 @@ public:
 		m_copro_tgp(*this, "copro_tgp"),
 		m_copro_tgp_program(*this, "copro_tgp_program"),
 		m_copro_tgp_tables(*this, "copro_tgp_tables"),
-		m_copro_tgp_bank(*this, "copro_tgp_bank")
+		m_copro_tgp_bank(*this, "copro_tgp_bank"),
+		m_copro_tgp_ram_lo(*this, "copro_tgp_ram_lo"),
+		m_copro_tgp_ram_hi(*this, "copro_tgp_ram_hi")
 	{}
 
 protected:
@@ -413,6 +415,7 @@ protected:
 	required_shared_ptr<u32> m_copro_tgp_program;
 	required_region_ptr<u32> m_copro_tgp_tables;
 	memory_view m_copro_tgp_bank;
+	required_shared_ptr<u32> m_copro_tgp_ram_lo, m_copro_tgp_ram_hi;
 
 	u32 m_copro_tgp_bank_reg = 0;
 	u32 m_copro_sincos_base = 0;

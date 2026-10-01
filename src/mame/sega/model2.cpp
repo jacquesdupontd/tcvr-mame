@@ -282,6 +282,14 @@ void model2_state::machine_start()
 // le point de synchronisation des donnees comme sur la carte. L'ordre des mots est identique a celui de
 // l'emulation sequentielle ; seule la date (en temps emule) a laquelle l'i960 les voit change.
 // debug.tcvr.m2.tgpthread=1 pour l'activer.
+extern "C" __attribute__((weak)) void tcvr_tgp_started(void);
+extern "C" __attribute__((weak)) int __android_log_print(int prio, const char *tag, const char *fmt, ...);
+static void tcvr_tgp_report(unsigned long long run_ns, unsigned long long wait_ns)
+{
+	if (__android_log_print)
+		__android_log_print(4, "TGPTHREAD", "TGP : dans l'interpreteur %.0f ms, dont attente %.0f ms, utile %.0f ms", run_ns / 1e6, wait_ns / 1e6, (run_ns - wait_ns) / 1e6);
+}
+
 class model2_state::tcvr_tgp_thread
 {
 public:
@@ -402,6 +410,8 @@ private:
 	}
 	void wait_in(u32 t)
 	{
+		const auto tw0 = std::chrono::steady_clock::now();
+		struct acc { std::chrono::steady_clock::time_point t0; unsigned long long &sum; ~acc() { sum += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count(); } } guard{ tw0, m_wait_ns };
 		// attente active d'abord (m_spin_us) : un reveil de fil coute des dizaines de microsecondes et l'i960 attend souvent la reponse
 		const auto t0 = std::chrono::steady_clock::now();
 		for (int i = 0;; ++i)
@@ -419,6 +429,7 @@ private:
 	}
 	void loop()
 	{
+		if (tcvr_tgp_started) tcvr_tgp_started();   // (Switch : le profileur retrouve ce fil)
 		for (;;)
 		{
 			{
@@ -429,8 +440,18 @@ private:
 				if (m_quit) return;
 				m_parked = false;
 			}
+			unsigned long long tlast = 0;
 			while (m_want_run.load() && !m_quit.load())
+			{
+				const auto t0 = std::chrono::steady_clock::now();
 				m_dev.tcvr_run(2048);
+				m_run_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+				if (m_run_ns - tlast > 5000000000ull)   // un compte rendu toutes les ~5 s de fil actif
+				{
+					tlast = m_run_ns;
+					tcvr_tgp_report(m_run_ns, m_wait_ns);
+				}
+			}
 		}
 	}
 
@@ -440,6 +461,7 @@ private:
 	std::atomic<bool> m_want_run{ false }, m_quit{ false }, m_sleeping{ false };
 	bool m_parked = true;
 	int m_spin_us = 150;
+	unsigned long long m_run_ns = 0, m_wait_ns = 0;   // fil TGP seul
 public:
 	std::atomic<unsigned long long> m_n_in_sleep{0}, m_n_in_empty{0}, m_n_out_fail{0}, m_n_out_wait{0}, m_n_in_words{0}, m_n_out_words{0};
 private:
@@ -451,7 +473,12 @@ private:
 
 static bool tcvr_tgp_thread_wanted()
 {
+#if defined(__SWITCH__)
+	// Switch : actif par defaut (mesure : course lourde 45-58 -> 59-60 images/s) ; =0 pour l'ancien comportement sequentiel
+	static const bool want = [] { char v[PROP_VALUE_MAX] = {}; return !(__system_property_get("debug.tcvr.m2.tgpthread", v) > 0 && v[0] == '0'); }();
+#else
 	static const bool want = [] { char v[PROP_VALUE_MAX] = {}; return __system_property_get("debug.tcvr.m2.tgpthread", v) > 0 && v[0] == '1'; }();
+#endif
 	return want;
 }
 #endif
@@ -467,6 +494,8 @@ void model2_state::tcvr_tgp_destroy()
 void model2_tgp_state::machine_start()
 {
 	model2_state::machine_start();
+
+	m_copro_tgp->tcvr_set_ram(m_copro_tgp_ram_lo, m_copro_tgp_ram_hi);
 
 #if defined(__ANDROID__)
 	if (tcvr_tgp_thread_wanted() && !m_tcvr_tgp)
@@ -775,8 +804,8 @@ void model2_tgp_state::copro_tgp_prog_map(address_map &map)
 
 void model2_tgp_state::copro_tgp_data_map(address_map &map)
 {
-	map(0x0000, 0x00ff).ram();
-	map(0x0200, 0x03ff).ram();
+	map(0x0000, 0x00ff).ram().share("copro_tgp_ram_lo");
+	map(0x0200, 0x03ff).ram().share("copro_tgp_ram_hi");
 }
 
 void model2_tgp_state::copro_tgp_io_map(address_map &map)
@@ -2931,7 +2960,9 @@ void model2_state::model2_scsp(machine_config &config)
 	// coeur exact de MAME. debug.tcvr.m2.musashi=0 revient au coeur exact (A/B de vitesse et d'ecoute).
 	{
 		char v[PROP_VALUE_MAX] = {};
-		const bool musashi = !(__system_property_get("debug.tcvr.m2.musashi", v) > 0 && v[0] == '0');
+		// Defaut : coeur exact. Musashi coupait des sons (coup de piece, voix du copilote : mesure par capture audio, 01/10/2026) ;
+		// debug.tcvr.m2.musashi=1 le reactive.
+		const bool musashi = (__system_property_get("debug.tcvr.m2.musashi", v) > 0 && v[0] == '1');
 		s_tcvr_snd_musashi = musashi;
 		if (musashi) M68000MUSASHI(config, m_audiocpu, 45.1584_MHz_XTAL / 4); else M68000(config, m_audiocpu, 45.1584_MHz_XTAL / 4);
 	}

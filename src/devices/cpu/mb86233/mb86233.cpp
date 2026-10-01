@@ -712,7 +712,7 @@ void mb86233_device::write_mem_internal_1(u32 r, u32 v, bool bank)
 	u16 ea = ea_pre_1(r);
 	if(bank)
 		ea += 0x200;
-	m_data.write_dword(ea, v);
+	wr_data(ea, v);
 	ea_post_1(r);
 }
 
@@ -727,7 +727,9 @@ void mb86233_device::execute_run()
 {
 	while(m_icount > 0) {
 		m_ppc = m_pc;
+#if !defined(__ANDROID__)
 		debugger_instruction_hook(m_ppc);
+#endif
 		u32 opcode = m_cache.read_dword(m_pc++);
 
 		switch((opcode >> 26) & 0x3f) {
@@ -745,7 +747,7 @@ void mb86233_device::execute_run()
 				// lab mem, mem (e)
 
 				u32 ea1 = ea_pre_0(r1);
-				u32 v1 = m_data.read_dword(ea1);
+				u32 v1 = rd_data(ea1);
 				if(m_stall) goto do_stall;
 
 				u32 ea2 = ea_pre_1(r2);
@@ -764,11 +766,11 @@ void mb86233_device::execute_run()
 				// lab mem, mem + 0x200
 
 				u32 ea1 = ea_pre_0(r1);
-				u32 v1 = m_data.read_dword(ea1);
+				u32 v1 = rd_data(ea1);
 				if(m_stall) goto do_stall;
 
 				u32 ea2 = ea_pre_1(r2) + 0x200;
-				u32 v2 = m_data.read_dword(ea2);
+				u32 v2 = rd_data(ea2);
 				if(m_stall) goto do_stall;
 
 				ea_post_0(r1);
@@ -783,11 +785,11 @@ void mb86233_device::execute_run()
 				// lab mem + 0x200, mem
 
 				u32 ea1 = ea_pre_0(r1) + 0x200;
-				u32 v1 = m_data.read_dword(ea1);
+				u32 v1 = rd_data(ea1);
 				if(m_stall) goto do_stall;
 
 				u32 ea2 = ea_pre_1(r2);
-				u32 v2 = m_data.read_dword(ea2);
+				u32 v2 = rd_data(ea2);
 				if(m_stall) goto do_stall;
 
 				ea_post_0(r1);
@@ -824,7 +826,7 @@ void mb86233_device::execute_run()
 			case 0: {
 				// mov mem, mem (e)
 				u32 ea = ea_pre_0(r1);
-				u32 v = m_data.read_dword(ea);
+				u32 v = rd_data(ea);
 				if(m_stall) goto do_stall;
 				ea_post_0(r1);
 				alu_post_1(alu);
@@ -835,7 +837,7 @@ void mb86233_device::execute_run()
 			case 1: {
 				// mov mem, mem (e)
 				u32 ea = ea_pre_0(r1);
-				u32 v = m_data.read_dword(ea);
+				u32 v = rd_data(ea);
 				if(m_stall) goto do_stall;
 				ea_post_0(r1);
 				alu_post_1(alu);
@@ -857,7 +859,7 @@ void mb86233_device::execute_run()
 			case 3: {
 				// mov mem, mem + 0x200
 				u32 ea = ea_pre_0(r1);
-				u32 v = m_data.read_dword(ea);
+				u32 v = rd_data(ea);
 				if(m_stall) goto do_stall;
 				ea_post_0(r1);
 				alu_post_1(alu);
@@ -868,7 +870,7 @@ void mb86233_device::execute_run()
 			case 4: {
 				// mov mem + 0x200, mem
 				u32 ea = ea_pre_0(r1) + 0x200;
-				u32 v = m_data.read_dword(ea);
+				u32 v = rd_data(ea);
 				if(m_stall) goto do_stall;
 				ea_post_0(r1);
 				alu_post_1(alu);
@@ -910,7 +912,7 @@ void mb86233_device::execute_run()
 				case 2: {
 					// mov mem + 0x200, reg
 					u32 ea = ea_pre_1(r1) + 0x200;
-					u32 v = m_data.read_dword(ea);
+					u32 v = rd_data(ea);
 					if(m_stall) goto do_stall;
 					ea_post_1(r1);
 					alu_post_1(alu);
@@ -921,7 +923,7 @@ void mb86233_device::execute_run()
 				case 3: {
 					// mov mem, reg
 					u32 ea = ea_pre_1(r1);
-					u32 v = m_data.read_dword(ea);
+					u32 v = rd_data(ea);
 					if(m_stall) goto do_stall;
 					ea_post_1(r1);
 					alu_post_1(alu);
@@ -1139,7 +1141,7 @@ void mb86233_device::execute_run()
 					} else {
 						// brul adr
 						u32 ea = ea_pre_0(opcode);
-						u32 v = m_data.read_dword(ea);
+						u32 v = rd_data(ea);
 						if(m_stall) goto do_stall;
 						ea_post_0(opcode);
 						m_pc = v;
@@ -1161,7 +1163,7 @@ void mb86233_device::execute_run()
 					} else {
 						// bsul adr
 						u32 ea = ea_pre_0(opcode);
-						u32 v = m_data.read_dword(ea);
+						u32 v = rd_data(ea);
 						if(m_stall) goto do_stall;
 						ea_post_0(opcode);
 						pcs_push();
@@ -1175,7 +1177,7 @@ void mb86233_device::execute_run()
 
 				case 6: { // ldif adr, rn
 					u32 ea = ea_pre_0(opcode);
-					u32 v = m_data.read_dword(ea);
+					u32 v = rd_data(ea);
 					if(m_stall) goto do_stall;
 					ea_post_0(opcode);
 					write_reg(opcode >> 9, v);
