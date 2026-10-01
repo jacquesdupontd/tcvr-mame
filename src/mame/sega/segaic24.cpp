@@ -518,13 +518,49 @@ void segas24_tile_device::draw(screen_device &screen, bitmap_ind16 &bitmap, cons
 void segas24_tile_device::draw(screen_device &screen, bitmap_rgb32 &bitmap, const rectangle &cliprect, int layer, int lpri, int flags)
 { draw_common(screen, bitmap, cliprect, layer, lpri, flags); }
 
+static inline uint32_t tcvr_ov_hash(uint32_t key, uint32_t mask) { return (key * 2654435761u >> 7) & mask; }
+
 uint16_t segas24_tile_device::tcvr_overlay(bool is_char, offs_t offset) const
 {
-	uint16_t v = is_char ? char_ram[offset] : tile_ram[offset];
-	for (const tcvr_pending &e : m_tcvr_pending)
-		if (e.offset == offset && e.is_char == is_char)
-			v = (v & ~e.mask) | (e.data & e.mask);
-	return v;
+	const uint32_t key = uint32_t(offset) | (is_char ? 0x80000000u : 0u);
+	const uint32_t mask = uint32_t(m_tcvr_ov.size()) - 1;
+	for(uint32_t i = tcvr_ov_hash(key, mask);; i = (i + 1) & mask) {
+		const tcvr_ov &e = m_tcvr_ov[i];
+		if(e.key == key)
+			return e.val;
+		if(e.key == 0xffffffffu)
+			break;
+	}
+	return is_char ? char_ram[offset] : tile_ram[offset];
+}
+
+void segas24_tile_device::tcvr_ov_put(bool is_char, offs_t offset, uint16_t v)
+{
+	const uint32_t key = uint32_t(offset) | (is_char ? 0x80000000u : 0u);
+	if(m_tcvr_ov_used.size() * 4 >= m_tcvr_ov.size() * 3) {   // plus de 75 % : on double (jamais de boucle infinie)
+		std::vector<tcvr_ov> old(std::move(m_tcvr_ov));
+		m_tcvr_ov.assign(old.size() * 2, tcvr_ov{ 0xffffffffu, 0 });
+		std::vector<uint32_t> used;
+		const uint32_t nm = uint32_t(m_tcvr_ov.size()) - 1;
+		for(const uint32_t oi : m_tcvr_ov_used) {
+			uint32_t j = tcvr_ov_hash(old[oi].key, nm);
+			while(m_tcvr_ov[j].key != 0xffffffffu)
+				j = (j + 1) & nm;
+			m_tcvr_ov[j] = old[oi];
+			used.push_back(j);
+		}
+		m_tcvr_ov_used.swap(used);
+	}
+	const uint32_t mask = uint32_t(m_tcvr_ov.size()) - 1;
+	for(uint32_t i = tcvr_ov_hash(key, mask);; i = (i + 1) & mask) {
+		tcvr_ov &e = m_tcvr_ov[i];
+		if(e.key == key) { e.val = v; return; }
+		if(e.key == 0xffffffffu) {
+			e.key = key; e.val = v;
+			m_tcvr_ov_used.push_back(i);
+			return;
+		}
+	}
 }
 
 uint16_t segas24_tile_device::tile_r(offs_t offset)
@@ -563,8 +599,10 @@ void segas24_tile_device::tile_w(offs_t offset, uint16_t data, uint16_t mem_mask
 {
 	if(m_tcvr_busy.load(std::memory_order_acquire) || !m_tcvr_pending.empty()) {
 		const uint16_t cur = tcvr_overlay(false, offset);
-		if(((cur & ~mem_mask) | (data & mem_mask)) != cur)
+		const uint16_t nv = (cur & ~mem_mask) | (data & mem_mask);
+		if(nv != cur)
 			++g_tcvr_tile_version;
+		tcvr_ov_put(false, offset, nv);
 		m_tcvr_pending.push_back({ uint32_t(offset), data, mem_mask, false });
 		return;
 	}
@@ -576,8 +614,10 @@ void segas24_tile_device::char_w(offs_t offset, uint16_t data, uint16_t mem_mask
 {
 	if(m_tcvr_busy.load(std::memory_order_acquire) || !m_tcvr_pending.empty()) {
 		const uint16_t cur = tcvr_overlay(true, offset);
-		if(((cur & ~mem_mask) | (data & mem_mask)) != cur)
+		const uint16_t nv = (cur & ~mem_mask) | (data & mem_mask);
+		if(nv != cur)
 			++g_tcvr_tile_version;
+		tcvr_ov_put(true, offset, nv);
 		m_tcvr_pending.push_back({ uint32_t(offset), data, mem_mask, true });
 		return;
 	}
@@ -592,6 +632,9 @@ void segas24_tile_device::tcvr_flush()
 		return;
 	std::vector<tcvr_pending> list;
 	list.swap(m_tcvr_pending);
+	for(const uint32_t i : m_tcvr_ov_used)
+		m_tcvr_ov[i].key = 0xffffffffu;
+	m_tcvr_ov_used.clear();
 	for(const tcvr_pending &e : list) {
 		if(e.is_char)
 			char_apply(e.offset, e.data, e.mask);

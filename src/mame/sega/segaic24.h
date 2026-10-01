@@ -83,6 +83,12 @@ private:
 
 	struct tcvr_pending { uint32_t offset; uint16_t data, mask; bool is_char; };
 	std::vector<tcvr_pending> m_tcvr_pending;
+	// valeur courante (RAM + ecritures en attente) par adresse : table a adressage ouvert, videe par tcvr_flush ; evite le parcours
+	// lineaire (quadratique) de la liste a chaque ecriture/lecture pendant un dessin
+	struct tcvr_ov { uint32_t key; uint16_t val; };
+	std::vector<tcvr_ov> m_tcvr_ov = std::vector<tcvr_ov>(1u << 14, tcvr_ov{ 0xffffffffu, 0 });
+	std::vector<uint32_t> m_tcvr_ov_used;
+	void tcvr_ov_put(bool is_char, offs_t offset, uint16_t v);
 	std::atomic<bool> m_tcvr_busy{false};
 	uint16_t tcvr_overlay(bool is_char, offs_t offset) const;
 	bool tile_apply(offs_t offset, uint16_t data, uint16_t mem_mask);
