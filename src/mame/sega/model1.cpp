@@ -606,6 +606,37 @@ Notes:
 
 #include "model1io2.lh"
 
+#if defined(__ANDROID__)
+#include <android/log.h>
+#include <sys/system_properties.h>
+extern "C" int tcvr_uart_pulses_app();   // tcvr.cpp: the app's choice for the next machine
+#endif
+
+namespace {
+
+int g_tcvr_m1main_uart_n = 1;   // pulses per main-board UART clock event, set when the machine is configured (as model2.cpp)
+
+// Pulses per main-board UART clock event (01/10): debug.tcvr.m2.uartN (1, 2 or 4) first, then the app's profile; 0 =
+// nobody asked, MAME's own clock (the Model 2 boards' rule, model2.cpp tcvr_uart_pulses).
+int tcvr_m1_uart_pulses()
+{
+	int n = 0;
+	char const *from = "MAME's own clock";
+#if defined(__ANDROID__)
+	char value[PROP_VALUE_MAX] = {};
+	if (__system_property_get("debug.tcvr.m2.uartN", value) > 0 && value[0] && value[0] != '"') {
+		int const p = atoi(value);
+		if (p == 1 || p == 2 || p == 4) { n = p; from = "property debug.tcvr.m2.uartN"; }
+	} else if (int const a = tcvr_uart_pulses_app(); a == 1 || a == 2 || a == 4) {
+		n = a; from = "the app's profile (UartPulsesFor)";
+	}
+	__android_log_print(ANDROID_LOG_INFO, "TCVR_UART", "Model 1 main board: %d pulses per clock event (%s)", n, from);
+#endif
+	return n;
+}
+
+}  // anonymous namespace
+
 
 // On the real system, another 315-5338A is acting as slave
 // and writes the data to the dual port RAM. This isn't
@@ -1388,6 +1419,22 @@ void model1_state::init_vr()
 	w8(0xff7d60, 0xcd); w8(0xff7d61, 0xcd);   // grid-border mask test: 25 bits only
 	w8(0xff7d8f, 0xcd); w8(0xff7d90, 0xcd);   // direction mask tests: 25 bits only
 	w8(0xff7d9f, 0xcd); w8(0xff7da0, 0xcd);
+
+	// The game's polygon budget (found 01/10/2026, Guillaume: "on démarre la course avec que du vert ... on voit rien à
+	// plus de 10 m, ça apparaît au fur et à mesure"). Before each cell, FF84A2 compares the cost drawn so far (5011A0)
+	// with a budget (5011B0) and skips the cell past it; the budget is 5500, written once by "mov.w #157C, 5011B0" at
+	// FE11BD. The cabinet's 5x5 cells in the view direction reach 5400-6000; the 7x7 cells all round up to twice that:
+	// with 5500, 30-45 % of the cells were skipped (attract race, PC MAME) -- the pit lane and the garages at a crowded
+	// start (MAME's own picture too), and the far cells ahead, the last of the walk. The game keeps its 30 Hz at any
+	// budget in MAME. debug.tcvr.vr.budget overrides it (bench).
+	int budget = 16500;
+#if defined(__ANDROID__)
+	char bvalue[PROP_VALUE_MAX] = {};
+	if (__system_property_get("debug.tcvr.vr.budget", bvalue) > 0 && bvalue[0] && bvalue[0] != '"')
+		budget = atoi(bvalue);
+#endif
+	if (rom[0xfe11bd] == 0x2d && rom[0xfe11c0] == 0x7c && rom[0xfe11c1] == 0x15 && rom[0xfe11c2] == 0 && budget > 0)
+		w32(0xfe11c0, u32(budget));
 }
 
 ROM_START( vr )
@@ -1908,9 +1955,36 @@ void model1_state::model1(machine_config &config)
 	m_m1uart->rxrdy_handler().set(FUNC(model1_state::sound_ready_w));
 	m_m1uart->txrdy_handler().set(FUNC(model1_state::sound_ready_w));
 
-	clock_device &m1uart_clock(CLOCK(config, "m1uart_clock", 16_MHz_XTAL / 2 / 16)); // 16 times 31.25kHz (standard Sega/MIDI sound data rate)
-	m1uart_clock.signal_handler().set(m_m1uart, FUNC(i8251_device::write_txc));
-	m1uart_clock.signal_handler().append(m_m1uart, FUNC(i8251_device::write_rxc));
+	// TCVR (01/10, Virtua Racing at 60 IMAGES: 18.3 ms of emulation a frame, 99 % of the seconds with a hitch): the main
+	// board's 500 kHz UART clock toggled a timer a million times a second, each one a scheduler slice in which the V60,
+	// the I/O board and the sound 68000 were all re-entered (208 + 154 + 188 ms of CPU a second, the 3D coprocessor 8).
+	// The Model 2 boards' edge-pulse clock (model2.cpp, tcvr_uart_pulsen_w): N pulses per event, the same pulses per
+	// second. Only when asked -- debug.tcvr.m2.uartN or the app's profile (m2.uartPulses, UartPulsesFor) -- else MAME's.
+	if (int const n = tcvr_m1_uart_pulses(); n > 0)
+	{
+		g_tcvr_m1main_uart_n = n;
+		clock_device &m1uart_clock(CLOCK(config, "m1uart_clock", 16_MHz_XTAL / 2 / 32 / n));
+		m1uart_clock.signal_handler().set(FUNC(model1_state::tcvr_uart_pulsen_w));
+	}
+	else
+	{
+		clock_device &m1uart_clock(CLOCK(config, "m1uart_clock", 16_MHz_XTAL / 2 / 16)); // 16 times 31.25kHz (standard Sega/MIDI sound data rate)
+		m1uart_clock.signal_handler().set(m_m1uart, FUNC(i8251_device::write_txc));
+		m1uart_clock.signal_handler().append(m_m1uart, FUNC(i8251_device::write_rxc));
+	}
+}
+
+// One clock event, N full UART pulses (the i8251 receives on the rising edge, transmits on the falling one). 4 at most:
+// the chip samples a 32 us bit in its middle by counting 16 pulses, groups of 4 (8 us) keep the sample 16-24 us in.
+void model1_state::tcvr_uart_pulsen_w(int state)
+{
+	for (int i = 0; i < g_tcvr_m1main_uart_n; i++)
+	{
+		m_m1uart->write_txc(1);
+		m_m1uart->write_rxc(1);
+		m_m1uart->write_txc(0);
+		m_m1uart->write_rxc(0);
+	}
 }
 
 void model1_state::vf(machine_config &config)

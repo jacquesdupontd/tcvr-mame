@@ -13,6 +13,10 @@
 
 #include <glm/geometric.hpp>
 
+#if defined(__ANDROID__)
+#include <android/log.h>
+#endif
+
 #define LOG_TGP (1U << 1)
 
 #define VERBOSE (0)
@@ -1467,6 +1471,23 @@ void model1_state::view_t::set_view_translation(float x, float y)
 
 
 
+// TCVR (01/10): the display list of each frame, summed over a second (TCVR_M1LIST): objects drawn, words used out of the
+// 32768 a bank holds, and how the walk ended (0xf = the game's own end marker). Made for Virtua Racing's 7x7 draw grid:
+// at a crowded race start the pit lane and the garages were missing for 6 s, on MAME's own picture too.
+static void tcvr_list_census(int words, int objs, int end_type)
+{
+	static int frames = 0, objMin = 1 << 30, objMax = 0, wordMax = 0, odd = 0, lastOdd = 0;
+	++frames;
+	objMin = std::min(objMin, objs); objMax = std::max(objMax, objs); wordMax = std::max(wordMax, words);
+	if (end_type != 0xf) { ++odd; lastOdd = end_type; }
+	if (frames < 60) return;
+#if defined(__ANDROID__)
+	__android_log_print(ANDROID_LOG_INFO, "TCVR_MAME", "TCVR_M1LIST %d images | objets %d..%d | liste max %d mots sur 32768 | %d fins sans marqueur (dernier type %d)",
+		frames, objMin, objMax, wordMax, odd, lastOdd);
+#endif
+	frames = 0; objMin = 1 << 30; objMax = 0; wordMax = 0; odd = 0;
+}
+
 void model1_state::tgp_render(bitmap_rgb32 &bitmap, const rectangle &cliprect, render_pass pass)
 {
 	m_tcvr_pass = pass;
@@ -1480,6 +1501,7 @@ void model1_state::tgp_render(bitmap_rgb32 &bitmap, const rectangle &cliprect, r
 		float old_z = 0;
 
 		int list_offset = 0;
+		int tcvr_objs = 0, tcvr_end = 0;
 		for (;;) {
 			int type = readi(list_offset + 0);
 
@@ -1491,7 +1513,10 @@ void model1_state::tgp_render(bitmap_rgb32 &bitmap, const rectangle &cliprect, r
 			case 1:
 				// command 0x01 = object drawn below the cat1 HUD tilemaps
 				if (pass == RENDER_BELOW_HUD)
+				{
 					push_object(readi(list_offset + 2), readi(list_offset + 4), readi(list_offset + 6), old_z);
+					++tcvr_objs;
+				}
 				list_offset += 8;
 				break;
 			case 0x41:
@@ -1617,14 +1642,18 @@ void model1_state::tgp_render(bitmap_rgb32 &bitmap, const rectangle &cliprect, r
 				break;
 			case 0xf:
 				//case -1:
+				tcvr_end = 0xf;
 				goto end;
 			default:
 				LOGMASKED(LOG_TGP, "VIDEO:   unknown type %d\n", type);
+				tcvr_end = type;
 				goto end;
 			}
 		}
 	end:
 		draw_objects(bitmap, cliprect);
+		if (pass == RENDER_BELOW_HUD)
+			tcvr_list_census(list_offset, tcvr_objs, tcvr_end);
 	}
 }
 

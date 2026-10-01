@@ -226,6 +226,7 @@ protected:
 	uint16_t m_timer_val[2] = { 0, 0 };
 	uint16_t m_timer_mode = 0;
 	void sound_ready_w(int state);
+	void tcvr_uart_pulsen_w(int state);
 
 	uint8_t m_irq_status = 0;
 	uint8_t m_irq_mask = 0xff;
