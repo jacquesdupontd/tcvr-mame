@@ -291,6 +291,7 @@ public:
 		{ std::lock_guard<std::mutex> l(m_mtx); m_quit = true; m_want_run = false; }
 		m_cv.notify_all();
 		if (m_thread.joinable()) m_thread.join();
+		fprintf(stderr, "TGPTHREAD in=%llu out=%llu in_empty=%llu in_sleep=%llu out_wait=%llu out_fail=%llu\n", (unsigned long long)m_n_in_words, (unsigned long long)m_n_out_words, (unsigned long long)m_n_in_empty, (unsigned long long)m_n_in_sleep, (unsigned long long)m_n_out_wait, (unsigned long long)m_n_out_fail);
 	}
 
 	// ---- cote i960 ----
@@ -304,6 +305,7 @@ public:
 		}
 		m_in[h & (N - 1)] = v;
 		m_in_h.store(h + 1, std::memory_order_release);
+		++m_n_in_words;
 		wake_tgp();
 	}
 	bool pop_out(u32 &v)
@@ -311,7 +313,8 @@ public:
 		u32 t = m_out_t.load(std::memory_order_relaxed);
 		for (int spin = 0; m_out_h.load(std::memory_order_acquire) == t; ++spin)
 		{
-			if (spin > 200) return false;
+			if (spin == 0) ++m_n_out_wait;
+			if (spin > 200) { ++m_n_out_fail; return false; }
 			std::this_thread::yield();
 		}
 		v = m_out[t & (N - 1)];
@@ -345,6 +348,7 @@ public:
 		const u32 t = m_in_t.load(std::memory_order_relaxed);
 		if (m_in_h.load(std::memory_order_acquire) == t)
 		{
+			++m_n_in_empty;
 			wait_in(t);
 			if (m_in_h.load(std::memory_order_acquire) == t) { m_dev.stall(); return 0; }
 		}
@@ -364,6 +368,7 @@ public:
 		}
 		m_out[h & (N - 1)] = v;
 		m_out_h.store(h + 1, std::memory_order_release);
+		++m_n_out_words;
 	}
 
 private:
@@ -388,7 +393,7 @@ private:
 #endif
 		}
 		std::unique_lock<std::mutex> l(m_mtx);
-		m_sleeping = true;
+		m_sleeping = true; ++m_n_in_sleep;
 		std::atomic_thread_fence(std::memory_order_seq_cst);
 		if (m_in_h.load(std::memory_order_acquire) == t && m_want_run.load() && !m_quit)
 			m_cv.wait_for(l, std::chrono::microseconds(500));
@@ -416,6 +421,9 @@ private:
 	std::condition_variable m_cv, m_cv_state;
 	std::atomic<bool> m_want_run{ false }, m_quit{ false }, m_sleeping{ false };
 	bool m_parked = true;
+public:
+	std::atomic<unsigned long long> m_n_in_sleep{0}, m_n_in_empty{0}, m_n_out_fail{0}, m_n_out_wait{0}, m_n_in_words{0}, m_n_out_words{0};
+private:
 	alignas(64) std::atomic<u32> m_in_h{ 0 }, m_in_t{ 0 };
 	alignas(64) std::atomic<u32> m_out_h{ 0 }, m_out_t{ 0 };
 	u32 m_in[N], m_out[N];
