@@ -976,7 +976,14 @@ void model2_state::render_polygons(bitmap_rgb32 &bitmap, const rectangle &clipre
 					while (poly != nullptr)
 					{
 						if (poly->window == window)
-							model2_3d_project(poly);   // keep state; skip model2_3d_render
+							{
+								model2_3d_project(poly);   // keep state; skip the software raster
+								// Switch (01/10): the flat renderer consumes the CLIPPED stream, which model2_3d_render records.
+								// In mode 2 that function returns right after recording (no texture decode, no raster).
+								// debug.tcvr.m2.recordClipped=0 restores the Quest's behaviour (raw stream only).
+								static const bool record_clipped = [] { char v[PROP_VALUE_MAX] = {}; return !(__system_property_get("debug.tcvr.m2.recordClipped", v) > 0 && v[0] == '0'); }();
+								if (record_clipped) m_renderer->model2_3d_render(poly, cliprect);
+							}
 						poly = (polygon *)poly->next;
 					}
 				}
