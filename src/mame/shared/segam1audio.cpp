@@ -18,6 +18,8 @@
 #include <sys/system_properties.h>
 #endif
 
+extern "C" int tcvr_uart_pulses_app();   // tcvr.cpp: the app's choice for the next machine
+
 namespace {
 
 // TCVR (01/10, Daytona USA): the edge-pulse UART clock of the Model 2 main board (model2.cpp, 23/09), on the
@@ -43,9 +45,12 @@ int tcvr_uart_pulses()
 {
 #if defined(__ANDROID__)
 	char value[PROP_VALUE_MAX] = {};
-	if (__system_property_get("debug.tcvr.m2.uartN", value) <= 0 || !value[0] || value[0] == '"') return 1;
-	int const n = atoi(value);
-	return (n == 1 || n == 2 || n == 4) ? n : 1;
+	if (__system_property_get("debug.tcvr.m2.uartN", value) > 0 && value[0] && value[0] != '"') {
+		int const p = atoi(value);
+		return (p == 1 || p == 2 || p == 4) ? p : 1;
+	}
+	int const a = tcvr_uart_pulses_app();
+	return (a == 1 || a == 2 || a == 4) ? a : 1;
 #else
 	return 1;
 #endif

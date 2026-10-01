@@ -100,6 +100,8 @@
 #include <android/log.h>
 #include <sys/system_properties.h>
 
+extern "C" int tcvr_uart_pulses_app();   // tcvr.cpp: the app's choice for the next machine
+
 namespace {
 
 // The Sega Rally cabinet carries two Z80s that a headset port can never make
@@ -136,9 +138,16 @@ static bool tcvr_prop_flag(char const *name, bool fallback)
 int tcvr_uart_pulses(int fallback)
 {
 	char value[PROP_VALUE_MAX] = {};
-	if (__system_property_get("debug.tcvr.m2.uartN", value) <= 0 || !value[0] || value[0] == '"') return fallback;
-	int const n = atoi(value);
-	return (n == 1 || n == 2 || n == 4) ? n : fallback;
+	int n = fallback;
+	char const *from = "the board path's own";
+	if (__system_property_get("debug.tcvr.m2.uartN", value) > 0 && value[0] && value[0] != '"') {
+		int const p = atoi(value);
+		if (p == 1 || p == 2 || p == 4) { n = p; from = "property debug.tcvr.m2.uartN"; }
+	} else if (int const a = tcvr_uart_pulses_app(); a == 1 || a == 2 || a == 4) {
+		n = a; from = "the app's profile (UartPulsesFor)";
+	}
+	__android_log_print(ANDROID_LOG_INFO, "TCVR_UART", "main board: %d pulses per clock event (%s)", n, from);
+	return n;
 }
 
 bool tcvr_cabinet_cpus_requested()

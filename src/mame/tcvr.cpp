@@ -197,6 +197,12 @@ static std::condition_variable g_tick_cv;
 static int g_tick_tokens = 0;
 static std::atomic<uint64_t> g_tick_count{ 0 };   // headset frames ticked so far (the Model 2 queue advances once per tick)
 extern "C" void tcvr_mame_set_framelock(int on) { g_tcvr_framelock.store(on, std::memory_order_release); }
+// UART pulses per clock event the app asks for the next machine (profiles::UartPulsesFor: 4 for a game with no tuning
+// history, 0 = the board path's own). Read by model2.cpp and segam1audio.cpp while the machine is configured; the
+// property debug.tcvr.m2.uartN still wins, for the bench.
+static std::atomic<int> g_tcvr_uart_pulses_app{ 0 };
+extern "C" void tcvr_mame_set_uart_pulses(int n) { g_tcvr_uart_pulses_app.store(n, std::memory_order_release); }
+extern "C" int tcvr_uart_pulses_app() { return g_tcvr_uart_pulses_app.load(std::memory_order_acquire); }
 extern "C" void tcvr_mame_frame_tick()
 {
 	g_tick_count.fetch_add(1, std::memory_order_acq_rel);
