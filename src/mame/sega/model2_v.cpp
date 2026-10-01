@@ -3101,6 +3101,22 @@ u32 model2_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, con
 	if (!tiles_hit)
 	{
 	TCVR_EXACT(4);   // copie vers le bitmap + sauvegarde du fond 2D
+	if (tcvr_m2_scene_mode() >= 2)
+	{
+		// Mode 2 : l'image du CPU n'est jamais affichee. Le fond 2D (couleur du pen 0 la ou les tuiles sont transparentes) est
+		// compose DIRECTEMENT dans le tampon publie : un seul passage, au lieu de copybitmap_trans puis une recopie.
+		const u32 w = cliprect.width(), h = cliprect.height();
+		const u32 bg = m_palette->pen(0);
+		m_tcvr_back2d.resize(size_t(w) * size_t(h));
+		for (u32 y = 0; y < h; y++)
+		{
+			const u32 *src = &m_sys24_bitmap.pix(cliprect.top() + y, cliprect.left());
+			u32 *dst = m_tcvr_back2d.data() + size_t(y) * w;
+			for (u32 x = 0; x < w; x++) dst[x] = src[x] ? src[x] : bg;
+		}
+	}
+	else
+	{
 	copybitmap_trans(bitmap, m_sys24_bitmap, 0, 0, 0, 0, cliprect, 0);
 
 	// The frame as it stands before any polygon: this is what a GPU pass has to
@@ -3111,6 +3127,7 @@ u32 model2_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, con
 		std::memcpy(m_tcvr_back2d.data() + size_t(y) * cliprect.width(),
 		            &bitmap.pix(cliprect.top() + y, cliprect.left()),
 		            size_t(cliprect.width()) * 4);
+	}
 
 	}
 
@@ -3131,7 +3148,8 @@ u32 model2_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, con
 	for (int layer = 3; layer >= 0; layer--)
 		m_tiles->draw(screen, m_sys24_bitmap, cliprect, (layer<<1) | 1, 0, 0);
 
-	copybitmap_trans(bitmap, m_sys24_bitmap, 0, 0, 0, 0, cliprect, 0);
+	if (tcvr_m2_scene_mode() < 2)   // mode 2 : l'image du CPU n'est jamais affichee
+		copybitmap_trans(bitmap, m_sys24_bitmap, 0, 0, 0, 0, cliprect, 0);
 	}
 
 	if (!tiles_hit) ++m_tcvr_layers_rev;

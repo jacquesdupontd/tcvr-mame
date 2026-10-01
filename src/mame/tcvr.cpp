@@ -201,7 +201,10 @@ extern "C" void tcvr_mame_frame_tick()
 {
 	{
 		std::lock_guard<std::mutex> lock(g_tick_mutex);
-		if (g_tick_tokens < 2) ++g_tick_tokens;   // never more than two frames ahead
+		// Jusqu'a N images de retard rattrapables (defaut 6 = 100 ms) : une scene lourde isolee n'ecrase plus la moyenne, l'emulation
+		// rattrape ensuite dans les images legeres. debug.tcvr.tokencap=2 redonne l'ancien comportement.
+		static const int cap = [] { char v[PROP_VALUE_MAX] = {}; int n = (__system_property_get("debug.tcvr.tokencap", v) > 0 && v[0]) ? atoi(v) : 6; return n < 1 ? 1 : n > 30 ? 30 : n; }();
+		if (g_tick_tokens < cap) ++g_tick_tokens;
 	}
 	g_tick_cv.notify_one();
 }
@@ -226,6 +229,15 @@ public:
 		if (!screen || screen->renderbitmap().format() != BITMAP_FORMAT_RGB32)
 			return;
 
+		// Sur Switch la scene est dessinee par le GPU (mode 2) : personne ne lit cette copie du framebuffer (760 Ko par image,
+		// 1,7 % du fil d'emulation, mesure par echantillonnage). debug.tcvr.videocopy=1 la remet.
+#if defined(__SWITCH__)
+		static const bool doCapture = property_flag("debug.tcvr.videocopy", false);
+#else
+		constexpr bool doCapture = true;
+#endif
+		if (doCapture)
+		{
 		bitmap_rgb32 &bitmap = screen->renderbitmap().as_rgb32();
 		rectangle const visible = screen->visible_area();
 		// How much of the emulation thread does OUR capture actually take? It
@@ -285,6 +297,7 @@ public:
 				s_video.capture_worst_us = 0;
 				s_video.capture_frames = 0;
 			}
+		}
 		}
 		// Live (menu VITESSE): back to ORIGINALE, MAME paces on its own clock again.
 		if (!tcvr_framelock_active() && !m_machine->video().throttled()) m_machine->video().set_throttled(true);
@@ -548,6 +561,11 @@ private:
 				pf("debug.tcvr.in.rx", rx);
 				pf("debug.tcvr.in.lt", lt);
 				pf("debug.tcvr.in.rt", rt);
+				// debug.tcvr.in.pulse=1 : une pièce (10 images) puis start (10 images) toutes les 300 images, comme un joueur
+				{
+					static unsigned pf2 = 0; static const bool pulse = [] { char b[PROP_VALUE_MAX] = {}; return __system_property_get("debug.tcvr.in.pulse", b) > 0 && b[0] == '1'; }();
+					if (pulse) { ++pf2; const unsigned m = pf2 % 300; coin = (m >= 60 && m < 70); start = (m >= 120 && m < 130); }
+				}
 			}
 			ioport_list const &ports = m_machine->ioport().ports();
 			auto find_port = [&ports](char const *tag) -> ioport_port *
@@ -578,6 +596,12 @@ private:
 						field->set_value(field->minval() + ioport_value(n * float(range)));
 					}
 			};
+			{
+				static unsigned inputTick = 0;
+				if ((++inputTick % 120) == 1)
+					__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_INPUT coin=%d start=%d steer=%.2f gas=%.2f brake=%.2f ports STEER=%p ACCEL=%p IN0=%p",
+						int(coin), int(start), steer, gas, brake, (void *)find_port("STEER"), (void *)find_port("ACCEL"), (void *)find_port("IN0"));
+			}
 			if (find_port("STEER") && find_port("ACCEL"))
 			{
 				// Sega Model 2 driving board. Its I/O tags and START bit do not
