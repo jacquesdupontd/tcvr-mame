@@ -650,6 +650,19 @@ void m2comm_device::read_fg()
 
 int m2comm_device::read_frame(int dataSize)
 {
+	// TCVR (01/10): the solo ring is a LOOPBACK, exactly what the PC build does (it listens on 15112 and connects to
+	// 127.0.0.1:15112, itself): the master hears its own 0xFF and counts one cabinet. Silent (24/09) was enough for
+	// Super GT, whose code falls back to STAND ALONE, not for Daytona USA, which waited for its link forever.
+	if (m_tcvr_solo)
+	{
+		if (m_tcvr_loop.empty())
+			return 0;
+		std::vector<uint8_t> const &f = m_tcvr_loop.front();
+		std::size_t const n = std::min<std::size_t>(std::size_t(dataSize), f.size());
+		std::copy(f.begin(), f.begin() + n, m_buffer0);
+		m_tcvr_loop.pop_front();
+		return int(n);
+	}
 	if (!m_line_rx)
 		return 0;
 
@@ -707,6 +720,12 @@ void m2comm_device::send_data(uint8_t frameType, int frameStart, int frameSize, 
 }
 
 void m2comm_device::send_frame(int dataSize){
+	if (m_tcvr_solo)
+	{
+		if (m_tcvr_loop.size() < 64)
+			m_tcvr_loop.emplace_back(m_buffer0, m_buffer0 + std::min<int>(dataSize, int(sizeof(m_buffer0))));
+		return;
+	}
 	if (!m_line_tx)
 		return;
 

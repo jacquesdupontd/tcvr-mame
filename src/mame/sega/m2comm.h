@@ -5,6 +5,9 @@
 
 #pragma once
 
+#include <deque>
+#include <vector>
+
 #define M2COMM_SIMULATION
 
 #include "osdfile.h"
@@ -70,6 +73,7 @@ private:
 #ifdef M2COMM_SIMULATION
 	uint8_t m_linkenable = 0;
 	bool m_tcvr_solo = false;
+	std::deque<std::vector<uint8_t>> m_tcvr_loop;   // solo ring = the PC's loopback: what this cabinet sends comes back to it
 	uint16_t m_linktimer = 0;
 	uint8_t m_linkalive = 0;
 	uint8_t m_linkid = 0;
