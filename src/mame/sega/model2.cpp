@@ -2745,6 +2745,13 @@ void model2_state::sj25_0207_01(machine_config &config)
 	m_drivecpu->set_addrmap(AS_PROGRAM, &model2_state::drive_map);
 	m_drivecpu->set_addrmap(AS_IO, &model2_state::drive_io_map);
 	m_drivecpu->set_vblank_int("screen", FUNC(model2_state::irq0_line_hold));
+#if defined(__ANDROID__)
+	// TCVR (01/10, Daytona USA): the drive board itself is never observable on a headset -- its only path back to the
+	// game, driveio_port_w(), is an empty body ("TODO: hook up to the main CPU") and there is no force-feedback wheel.
+	// Same reasoning as Sega Rally's (srallyc() below), now for every game that carries the board, not one by name.
+	if (!tcvr_cabinet_cpus_requested())
+		m_drivecpu->set_disable();
+#endif
 
 	sega_315_5296_device &driveio1(SEGA_315_5296(config, "driveio1")); // unknown clock
 	driveio1.out_pd_callback().set(FUNC(model2_state::driveio_port_w));

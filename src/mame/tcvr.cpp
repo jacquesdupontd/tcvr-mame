@@ -609,7 +609,12 @@ private:
 						field->set_value(field->minval() + ioport_value(n * float(range)));
 					}
 			};
-			if (find_port("STEER") && find_port("ACCEL"))
+			// Sega Rally's own wiring, by name (01/10): these fixed bits are ITS layout -- on Daytona USA IN0 0x20/0x40 are
+			// the VR1/VR2 cameras, and its gearbox was never driven. Every other game takes the generic path below.
+			char const *const sysname = m_machine->system().name;
+			char const *const sysparent = m_machine->system().parent;
+			bool const segaRallyWiring = !std::strcmp(sysname, "srallyc") || (sysparent && !std::strcmp(sysparent, "srallyc"));
+			if (segaRallyWiring && find_port("STEER") && find_port("ACCEL"))
 			{
 				// Sega Model 2 driving board. Its I/O tags and START bit do not
 				// match the System 22 ADC/INPUTS wiring; XR still supplies the same
@@ -621,6 +626,12 @@ private:
 				set_axis("ACCEL", gas);
 				set_axis("BRAKE", brake);
 				set_axis("IN2", pedal ? 1.0f : 0.0f);
+				if (m_inputMapMachine != m_machine)
+				{
+					m_inputMapMachine = m_machine;
+					__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_INPUTMAP %s (Sega Rally wiring) | driven: coin IN0.01, start IN0.40, "
+						"VR IN0.20, steering, accelerator, brake, hand brake IN2 | NOT driven: the GEAR N/1-4 fields (H-pattern gearbox)", sysname);
+				}
 			}
 			else if (find_port("ADC.0"))
 			{
@@ -662,19 +673,29 @@ private:
 				if (shift_down && !m_lastShiftDownG) m_gearPos = std::max(0, m_gearPos - 1);
 				m_lastShiftUpG = shift_up; m_lastShiftDownG = shift_down;
 				int vrSeen = 0;
+				// TCVR_INPUTMAP (01/10, the one-pass port): once per machine, every player-1 field and whether this path
+				// drives it -- a control left unwired shows in the port report, not at the player's first try.
+				bool const logMap = (m_inputMapMachine != m_machine);
+				std::string driven, idle;
+				auto note = [&](ioport_field const &f, bool d) {
+					if (!logMap) return;
+					std::string &dst = d ? driven : idle;
+					if (dst.size() < 900) { if (!dst.empty()) dst += ", "; dst += f.name(); }
+				};
 				for (auto const &port : ports)
 					for (ioport_field &field : port.second->fields())
 					{
 						if (field.player() != 0) continue;
 						std::string const &fname = field.name();
-						if (fname.rfind("VR", 0) == 0) { field.set_value((view && vrSeen == m_vrIndex) ? 1 : 0); ++vrSeen; continue; }
-						if (fname == "Shift Up")   { field.set_value(shift_up ? 1 : 0); continue; }
+						bool handled = true;
+						if (fname.rfind("VR", 0) == 0) { field.set_value((view && vrSeen == m_vrIndex) ? 1 : 0); ++vrSeen; note(field, true); continue; }
+						if (fname == "Shift Up")   { field.set_value(shift_up ? 1 : 0); note(field, true); continue; }
 						if (fname.rfind("GEAR ", 0) == 0 && fname.size() == 6) {
 							const int g = fname[5] == 'N' ? 0 : (fname[5] - '0');
 							field.set_value(g == m_gearPos ? 1 : 0);
-							continue;
+							note(field, true); continue;
 						}
-						if (fname == "Shift Down") { field.set_value(shift_down ? 1 : 0); continue; }
+						if (fname == "Shift Down") { field.set_value(shift_down ? 1 : 0); note(field, true); continue; }
 						// Top Skater, the skateboard deck (25/09, measured on the PC MAME, deterministic runs):
 						//  Curving = lean the deck; value 0 turns RIGHT, 255 turns LEFT (not flagged reversed in
 						//    MAME) -> left stick, full travel, right = right.
@@ -688,18 +709,18 @@ private:
 							float n = std::clamp(1.0f - lx, 0.0f, 1.0f);
 							if (field.analog_reverse()) n = 1.0f - n;
 							field.set_value(field.minval() + ioport_value(n * float(field.maxval() - field.minval())));
-							continue;
+							note(field, true); continue;
 						}
 						if (fname == "Slide") {
 							float n = std::clamp(rx, 0.0f, 1.0f);
 							if (field.analog_reverse()) n = 1.0f - n;
 							field.set_value(field.minval() + ioport_value(n * float(field.maxval() - field.minval())));
-							continue;
+							note(field, true); continue;
 						}
-						if (fname == "Jump Tail")  { field.set_value(rt > 0.5f ? 1 : 0); continue; }
-						if (fname == "Jump Front") { field.set_value(lt > 0.5f ? 1 : 0); continue; }
-						if (fname == "Select Left")  { field.set_value((shift_down || lx < 0.2f) ? 1 : 0); continue; }
-						if (fname == "Select Right") { field.set_value((shift_up || lx > 0.8f) ? 1 : 0); continue; }
+						if (fname == "Jump Tail")  { field.set_value(rt > 0.5f ? 1 : 0); note(field, true); continue; }
+						if (fname == "Jump Front") { field.set_value(lt > 0.5f ? 1 : 0); note(field, true); continue; }
+						if (fname == "Select Left")  { field.set_value((shift_down || lx < 0.2f) ? 1 : 0); note(field, true); continue; }
+						if (fname == "Select Right") { field.set_value((shift_up || lx > 0.8f) ? 1 : 0); note(field, true); continue; }
 						auto axis = [&field](float n) {
 							n = std::clamp(n, 0.0f, 1.0f);
 							if (field.analog_reverse()) n = 1.0f - n;   // raw override: reverse is not applied by MAME
@@ -717,10 +738,18 @@ private:
 						case IPT_PADDLE:      axis(steer); break;   // steering wheel
 						case IPT_PEDAL:       axis(gas); break;
 						case IPT_PEDAL2:      axis(brake); break;
+						case IPT_PEDAL3:      axis(pedal ? 1.0f : 0.0f); break;   // a hand brake (the A button with handBrakeOnA)
 						case IPT_AD_STICK_X:  axis(steer); break;   // Top Skater's Curving (Slide handled by name)
-						default: break;
+						default: handled = false; break;
 						}
+						note(field, handled);
 					}
+				if (logMap)
+				{
+					m_inputMapMachine = m_machine;
+					__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_INPUTMAP %s (generic path) | driven: %s | NOT driven: %s",
+						sysname, driven.empty() ? "-" : driven.c_str(), idle.empty() ? "-" : idle.c_str());
+				}
 			}
 			if (!m_inputLogged || coin != m_lastCoin || start != m_lastStart || trigger != m_lastTrigger || pedal != m_lastPedal)
 			{
@@ -757,6 +786,7 @@ private:
 	bool m_lastViewGeneric = false;
 	int m_vrIndex = 0;
 	int m_gearPos = 1;   // virtual H-pattern lever: 0 = N, 1..4
+	running_machine *m_inputMapMachine = nullptr;   // TCVR_INPUTMAP logged for this machine
 	bool m_lastShiftUpG = false, m_lastShiftDownG = false;
 	std::chrono::steady_clock::time_point m_lastRateTime = std::chrono::steady_clock::now();
 };
