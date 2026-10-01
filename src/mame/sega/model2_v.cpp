@@ -102,6 +102,10 @@
 #include <android/log.h>
 #include <sys/system_properties.h>
 #include <chrono>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <deque>
 namespace {
 // The raster workers draw into destmap while the emulation thread sits in
 // wait("End of frame"). Measured on Quest 3 with srallyc: 2.1-2.7ms of waiting
@@ -522,7 +526,14 @@ void model2_state::model2_3d_process_polygon(raster_state *raster, u32 attr)
 	// (x, y already multiplied by the focus, pz = depth), texture coordinates in
 	// texels -- BEFORE the frustum clip below. The immersive presentation needs
 	// what the board throws away outside its own field of view.
-	if (cull == false && tcvr_m2_scene_mode())
+#if defined(__SWITCH__)
+	// Le rendu Switch (fenetre plate) ne lit que le flux DECOUPE ; ce flux brut sert la vue immersive du Quest. L'enregistrer
+	// a chaque polygone coutait ~3 % du fil d'emulation. debug.tcvr.m2.raw=1 le remet.
+	static const bool tcvr_raw_wanted = [] { char v[PROP_VALUE_MAX] = {}; return __system_property_get("debug.tcvr.m2.raw", v) > 0 && v[0] == '1'; }();
+#else
+	constexpr bool tcvr_raw_wanted = true;
+#endif
+	if (cull == false && tcvr_raw_wanted && tcvr_m2_scene_mode())
 	{
 		tcvr_m2_raw_vertex rv[4];
 		for (int i = 0; i < NumVerts; i++)
@@ -2876,6 +2887,7 @@ void model2_state::video_start()
 	int height = visarea.height();
 
 	m_sys24_bitmap.allocate(width, height+4);
+	m_sys24_bitmap_b.allocate(width, height+4);
 
 	m_renderer = std::make_unique<model2_renderer>(*this);
 
@@ -2912,6 +2924,336 @@ void model2_state::video_start()
 	save_pointer(NAME(m_gamma_table), 256);
 }
 
+
+
+// =====================================================================================================================
+// TCVR : fil d'enregistrement de la scene (Switch, mode 2)
+//
+// Mesure en conduite reelle, profil par echantillonnage : le dessin des tuiles 2D, le parcours des polygones (projection +
+// enregistrement) et la publication (copies de tables, de couches, des polygones) occupaient ~25 % du fil d'emulation.
+// Rien de tout cela n'a besoin de l'etre : ce sont des fonctions de l'etat au vblank. On en prend donc une photographie
+// (tables de couleurs copiees, raster et couches 2D a double tampon) et un fil dedie fait le reste pendant que l'emulation
+// calcule l'image suivante.
+// =====================================================================================================================
+class model2_state::tcvr_scene_worker
+{
+public:
+	struct Job
+	{
+		enum Kind { Normal, Reuse, Empty } kind = Normal;
+		raster_state *raster = nullptr;
+		int rasterIdx = 0, set = 0;
+		int width = 0, height = 0;
+		rectangle cliprect;
+		int xoffs = 0, yoffs = 0, crtcX = 0, crtcY = 0;
+		std::vector<u16> palram, colorxlat;
+		std::vector<u8> lumaram;
+		u8 gamma[256] = {};
+		float focusX = 0, focusY = 0;
+		const u32 *tex0 = nullptr, *tex1 = nullptr;
+		u32 dirty[2][TCVR_TEX_BLOCKS / 32] = {};
+		u64 dirtyGen = 0, layersRev = 0;
+		const u32 *back2d = nullptr, *front2d = nullptr;
+		u32 front2dStride = 0;
+		bool geometryUnchanged = false;
+		double emuTime = 0;
+		u32 frameNo = 0;
+		int curWindow = 0;
+		u16 minZ = 0, maxZ = 0;
+	};
+
+	tcvr_scene_worker() : m_thread([this] { run(); }) {}
+	~tcvr_scene_worker()
+	{
+		{ std::lock_guard<std::mutex> l(m_mutex); m_stop = true; }
+		m_cvWork.notify_all();
+		if (m_thread.joinable()) m_thread.join();
+	}
+
+	// A free job slot; blocks while two jobs are already in flight.
+	Job &acquire()
+	{
+		std::unique_lock<std::mutex> l(m_mutex);
+		m_cvDone.wait(l, [&] { return m_inflight < 2; });
+		Job &j = m_jobs[m_next];
+		m_next = (m_next + 1) % 3;
+		return j;
+	}
+	void post(Job &j)
+	{
+		{
+			std::lock_guard<std::mutex> l(m_mutex);
+			if (j.kind == Job::Normal) m_rasterBusy[j.rasterIdx]++;
+			m_setBusy[j.set]++;
+			m_inflight++;
+			m_queue.push_back(&j);
+		}
+		m_cvWork.notify_one();
+	}
+	void wait_set_free(int s)
+	{
+		std::unique_lock<std::mutex> l(m_mutex);
+		m_cvDone.wait(l, [&] { return m_setBusy[s] == 0; });
+	}
+	void wait_raster_free(int r)
+	{
+		std::unique_lock<std::mutex> l(m_mutex);
+		m_cvDone.wait(l, [&] { return m_rasterBusy[r] == 0; });
+	}
+
+private:
+	void run()
+	{
+		for (;;)
+		{
+			Job *j = nullptr;
+			{
+				std::unique_lock<std::mutex> l(m_mutex);
+				m_cvWork.wait(l, [&] { return m_stop || !m_queue.empty(); });
+				if (m_queue.empty()) return;   // stop requested and nothing left
+				j = m_queue.front();
+				m_queue.pop_front();
+			}
+			process(*j);
+			{
+				std::lock_guard<std::mutex> l(m_mutex);
+				if (j->kind == Job::Normal) m_rasterBusy[j->rasterIdx]--;
+				m_setBusy[j->set]--;
+				m_inflight--;
+			}
+			m_cvDone.notify_all();
+		}
+	}
+
+	// The part of model2_3d_project + model2_renderer::model2_3d_render that mode 2 keeps: project, then record the clipped
+	// polygon (nothing is rasterised). Same arithmetic, on the job's own copy of the registers it reads.
+	static void record(polygon *poly, const Job &j)
+	{
+		for (int i = 0; i < poly->num_vertices; i++)
+		{
+			poly->v[i].x = j.crtcX + poly->center[0] + (poly->v[i].x / (poly->v[i].pz + std::numeric_limits<float>::min()));
+			poly->v[i].y = ((384 - poly->center[1]) + j.crtcY) - (poly->v[i].y / (poly->v[i].pz + std::numeric_limits<float>::min()));
+		}
+		const u8 renderer = (poly->texheader[0] >> 13) & 3;
+		rectangle vp(poly->viewport[0] + j.xoffs, poly->viewport[2] + j.xoffs, (384 - poly->viewport[3]) + j.yoffs, (384 - poly->viewport[1]) + j.yoffs);
+		vp &= j.cliprect;
+		tcvr_m2_prim tp{};
+		tp.checker = (poly->texheader[0] >> 15) & 1;
+		tp.lumabase = (poly->texheader[1] & 0xff) << 7;
+		tp.colorbase = (poly->texheader[3] >> 6) & 0x3ff;
+		tp.luma = poly->luma;
+		tp.texlod = poly->texlod;
+		if (renderer & 2)
+		{
+			tp.texmirrorx = (poly->texheader[0] >> 8) & 1;
+			tp.texmirrory = (poly->texheader[0] >> 9) & 1;
+			tp.texwrapx = (poly->texheader[0] >> 6) & 1 & ~tp.texmirrorx;
+			tp.texwrapy = (poly->texheader[0] >> 7) & 1 & ~tp.texmirrory;
+			tp.texwidth = 32 << ((poly->texheader[0] >> 0) & 0x7);
+			tp.texheight = 32 << ((poly->texheader[0] >> 3) & 0x7);
+			tp.texx = 32 * ((poly->texheader[2] >> 0) & 0x3f);
+			tp.texy = 32 * ((poly->texheader[2] >> 6) & 0x1f);
+			tp.utex = (poly->texheader[0] >> 12) & 1;
+			tp.utexminlod = (poly->texheader[0] >> 10) & 3;
+			tp.utexx = ((poly->texheader[2] >> 13) & 1) * 128;
+			tp.utexy = ((poly->texheader[2] >> 14) & 3) * 128;
+			for (int i = 0; i < poly->num_vertices; i++)
+			{
+				poly->v[i].pz = 1.0f / (poly->v[i].pz + std::numeric_limits<float>::min());
+				poly->v[i].pu = poly->v[i].pu * poly->v[i].pz * (1.0f / 8.0f);
+				poly->v[i].pv = poly->v[i].pv * poly->v[i].pz * (1.0f / 8.0f);
+			}
+		}
+		tcvr_m2_vertex tv[8];
+		const int tn = (poly->num_vertices > 8) ? 8 : int(poly->num_vertices);
+		for (int i = 0; i < tn; i++)
+		{
+			tv[i].x = poly->v[i].x;
+			tv[i].y = poly->v[i].y;
+			tv[i].ooz = poly->v[i].pz;
+			tv[i].uoz = poly->v[i].pu;
+			tv[i].voz = poly->v[i].pv;
+		}
+		tp.clip_l = vp.min_x; tp.clip_t = vp.min_y; tp.clip_r = vp.max_x; tp.clip_b = vp.max_y;
+		tp.textured = (renderer & 2) ? 1 : 0;
+		tp.translucent = (renderer & 1) ? 1 : 0;
+		tp.texsheet = (poly->texheader[2] & 0x1000) ? 1 : 0;
+		tp.center_x = poly->center[0];
+		tp.center_y = poly->center[1];
+		tp.window = poly->window;
+		tcvr_m2_scene_poly(tv, tn, &tp);
+	}
+
+	static void process(Job &j)
+	{
+		tcvr_m2_scene_begin(j.width, j.height);
+		if (j.kind == Job::Normal && j.raster)
+		{
+			raster_state *raster = j.raster;
+			for (int window = j.curWindow; window >= 0; window--)
+				for (int32_t z = j.minZ; z <= j.maxZ; z++)
+					for (polygon *poly = raster->poly_sorted_list[z]; poly != nullptr; poly = (polygon *)poly->next)
+						if (poly->window == window)
+							record(poly, j);
+		}
+		tcvr_m2_frame fp{};
+		fp.width = j.width;
+		fp.height = j.height;
+		fp.palram = j.palram.data();       fp.palram_entries = uint32_t(j.palram.size());
+		fp.colorxlat = j.colorxlat.data(); fp.colorxlat_entries = uint32_t(j.colorxlat.size());
+		fp.lumaram = j.lumaram.data();     fp.lumaram_entries = uint32_t(j.lumaram.size());
+		fp.gamma = j.gamma;                fp.gamma_entries = 256;
+		fp.focus_x = j.focusX; fp.focus_y = j.focusY;
+		fp.textureram[0] = j.tex0;
+		fp.textureram[1] = j.tex1;
+		fp.textureram_words = TCVR_TEX_BLOCKS * TCVR_TEX_BLOCK_WORDS;
+		fp.dirty[0] = j.dirty[0];
+		fp.dirty[1] = j.dirty[1];
+		fp.dirty_words = TCVR_TEX_BLOCKS / 32;
+		fp.dirty_blocks = TCVR_TEX_BLOCKS;
+		fp.dirty_block_words = TCVR_TEX_BLOCK_WORDS;
+		fp.dirty_generation = j.dirtyGen;
+		fp.back2d = j.back2d;   fp.back2d_stride = uint32_t(j.width);
+		fp.front2d = j.front2d; fp.front2d_stride = j.front2dStride;
+		fp.layers_revision = j.layersRev;
+		fp.crtc_xoffset = j.crtcX;
+		fp.crtc_yoffset = j.crtcY;
+		fp.geometry_unchanged = j.geometryUnchanged ? 1u : 0u;
+		fp.emu_time = j.emuTime;
+		fp.mame_frame = j.frameNo;
+		tcvr_m2_scene_end(&fp);
+	}
+
+	std::thread m_thread;
+	std::mutex m_mutex;
+	std::condition_variable m_cvWork, m_cvDone;
+	std::deque<Job *> m_queue;
+	Job m_jobs[3];
+	int m_next = 0, m_inflight = 0;
+	int m_rasterBusy[2] = { 0, 0 }, m_setBusy[2] = { 0, 0 };
+	bool m_stop = false;
+};
+
+model2_state::~model2_state()
+{
+	delete m_tcvr_worker;   // joins the thread: nothing may still read the rasters or the layers
+	m_tcvr_worker = nullptr;
+}
+
+bool model2_state::tcvr_offload_active()
+{
+#if defined(__SWITCH__)
+	static const bool want = [] { char v[PROP_VALUE_MAX] = {}; return !(__system_property_get("debug.tcvr.m2.worker", v) > 0 && v[0] == '0'); }();
+#else
+	// Hors Switch : active seulement a la demande (banc natif, ThreadSanitizer).
+	static const bool want = [] { char v[PROP_VALUE_MAX] = {}; return __system_property_get("debug.tcvr.m2.worker", v) > 0 && v[0] == '1'; }();
+#endif
+	if (!want || tcvr_m2_scene_mode() < 2 || m_render_test_mode)
+		return false;
+	if (!m_tcvr_worker)
+	{
+		m_raster_alt = std::make_unique<raster_state>();
+		m_raster_ptr[0] = m_raster.get();
+		m_raster_ptr[1] = m_raster_alt.get();
+		tcvr_m2_scene_raw_off(1);
+		m_tcvr_worker = new tcvr_scene_worker();
+	}
+	return true;
+}
+
+// The registers and tables of a raster that outlive a frame (everything but its polygon lists).
+static void tcvr_copy_raster_state(model2_state::raster_state &d, const model2_state::raster_state &s)
+{
+	d.texture_rom = s.texture_rom;
+	d.texture_rom_mask = s.texture_rom_mask;
+	std::copy(std::begin(s.viewport), std::end(s.viewport), std::begin(d.viewport));
+	for (int i = 0; i < 4; i++) { d.center[i][0] = s.center[i][0]; d.center[i][1] = s.center[i][1]; }
+	d.center_sel = s.center_sel;
+	d.reverse = s.reverse;
+	d.z_adjust = s.z_adjust;
+	d.polygon_z = s.polygon_z;
+	d.master_z_clip = s.master_z_clip;
+	d.cur_command = s.cur_command;
+	std::copy(std::begin(s.command_buffer), std::end(s.command_buffer), std::begin(d.command_buffer));
+	d.command_index = s.command_index;
+	d.poly_list_index = s.poly_list_index;
+	d.min_z = s.min_z;
+	d.max_z = s.max_z;
+	std::copy(std::begin(s.texture_ram), std::end(s.texture_ram), std::begin(d.texture_ram));
+	std::copy(std::begin(s.log_ram), std::end(s.log_ram), std::begin(d.log_ram));
+	d.cur_window = s.cur_window;
+	for (int i = 0; i < 4; i++) for (int k = 0; k < 4; k++) d.clip_plane[i][k] = s.clip_plane[i][k];
+	d.tcvr_obj_addr = s.tcvr_obj_addr;
+	d.tcvr_poly_idx = s.tcvr_poly_idx;
+	d.tcvr_obj_serial = s.tcvr_obj_serial;
+	d.tcvr_matrix_ok = s.tcvr_matrix_ok;
+}
+
+// Replaces render_polygons() + tcvr_m2_publish_scene() in mode 2: photograph, hand over, move on.
+void model2_state::tcvr_offload_frame(const rectangle &cliprect)
+{
+	tcvr_scene_worker &w = *m_tcvr_worker;
+	raster_state *cur = m_raster.get();
+	tcvr_scene_worker::Job &j = w.acquire();
+
+	if (m_render_done)                    { j.kind = tcvr_scene_worker::Job::Reuse;  m_tcvr_scene_geometry_unchanged = true;  m_tcvr_publish_path = 1; }
+	else if (cur->poly_list_index == 0)   { j.kind = tcvr_scene_worker::Job::Empty;  m_tcvr_scene_had_geometry = true; m_tcvr_scene_geometry_unchanged = false; m_tcvr_publish_path = 2; }
+	else                                  { j.kind = tcvr_scene_worker::Job::Normal; m_tcvr_scene_had_geometry = true; m_tcvr_scene_geometry_unchanged = false; m_tcvr_publish_path = 0; }
+
+	j.width = cliprect.width();
+	j.height = cliprect.height();
+	j.cliprect = cliprect;
+	j.xoffs = m_renderer->xoffset();
+	j.yoffs = m_renderer->yoffset();
+	j.crtcX = m_crtc_xoffset;
+	j.crtcY = m_crtc_yoffset;
+	j.palram.assign(m_palram.get(), m_palram.get() + 0x4000 / 2);
+	j.colorxlat.assign(m_colorxlat.get(), m_colorxlat.get() + 0xc000 / 2);
+	j.lumaram.assign(m_lumaram.get(), m_lumaram.get() + 0x8000);
+	std::memcpy(j.gamma, m_gamma_table, 256);
+	if (m_geo && m_geo->focus.x > 1.0f && m_geo->focus.y > 1.0f) { m_tcvr_focus_x = m_geo->focus.x; m_tcvr_focus_y = m_geo->focus.y; }
+	j.focusX = m_tcvr_focus_x;
+	j.focusY = m_tcvr_focus_y;
+	j.tex0 = m_textureram0;
+	j.tex1 = m_textureram1;
+	std::memcpy(j.dirty, m_tcvr_tex_dirty, sizeof(j.dirty));
+	j.dirtyGen = m_tcvr_tex_generation;
+	j.set = m_tcvr_set;
+	std::vector<u32> &back2d = (m_tcvr_set == 0) ? m_tcvr_back2d : m_tcvr_back2d_b;
+	bitmap_rgb32 &sys24 = (m_tcvr_set == 0) ? m_sys24_bitmap : m_sys24_bitmap_b;
+	j.back2d = back2d.empty() ? nullptr : back2d.data();
+	j.front2d = &sys24.pix(0);
+	j.front2dStride = u32(sys24.rowpixels());
+	j.layersRev = m_tcvr_layers_rev;
+	j.geometryUnchanged = m_tcvr_scene_geometry_unchanged;
+	j.emuTime = machine().time().as_double();
+	j.frameNo = m_screen->frame_number();
+
+	if (j.kind == tcvr_scene_worker::Job::Normal)
+	{
+		j.raster = cur;
+		j.rasterIdx = (cur == m_raster_ptr[0]) ? 0 : 1;
+		j.curWindow = cur->cur_window;
+		j.minZ = cur->min_z;
+		j.maxZ = cur->max_z;
+		// The geometry engine now builds the NEXT list in the other raster, which inherits the registers and tables.
+		const int other = 1 - j.rasterIdx;
+		w.wait_raster_free(other);
+		tcvr_copy_raster_state(*m_raster_ptr[other], *cur);
+		std::swap(m_raster, m_raster_alt);
+		m_geo->raster = m_raster.get();
+		m_render_done = true;   // render_frame_start clears it at the next geo_parse
+	}
+	else
+		j.raster = nullptr;
+
+	// Cleared once the frame carrying them is handed over, so no write is lost between two frames.
+	m_tcvr_scene_had_geometry = false;
+	std::memset(m_tcvr_tex_dirty, 0, sizeof(m_tcvr_tex_dirty));
+	m_tcvr_tex_writes[0] = m_tcvr_tex_writes[1] = 0;
+	m_tcvr_tex_generation++;
+	w.post(j);
+}
 
 // Publishes the recorded walk. Called at the very end of screen_update rather
 // than from render_polygons, because the System 24 layer that MAME draws OVER
@@ -3053,6 +3395,7 @@ u32 model2_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, con
 	// des caracteres, de la palette et de la fenetre. Mesure : 88 a 99 % des images ne changent rien. Dans ce cas on ne
 	// redessine rien : m_tcvr_back2d (fond) et m_sys24_bitmap (couche avant) gardent le resultat de l'image precedente.
 	// debug.tcvr.m2.tileCache=0 desactive.
+	const bool offload = tcvr_offload_active();
 	bool tiles_hit = false;
 	unsigned long long pal_sig = 1469598103934665603ull;
 	{
@@ -3064,8 +3407,17 @@ u32 model2_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, con
 #if defined(__ANDROID__)
 	static const bool tile_cache = [] { char v[PROP_VALUE_MAX] = {}; return !(__system_property_get("debug.tcvr.m2.tileCache", v) > 0 && v[0] == '0'); }();
 	tiles_hit = tile_cache && tcvr_m2_scene_mode() >= 2 && m_tcvr_tiles_valid && g_tcvr_tile_version == m_tcvr_tiles_ver &&
-	            pal_sig == m_tcvr_pal_sig && cliprect == m_tcvr_tiles_clip && !m_tcvr_back2d.empty();
+	            pal_sig == m_tcvr_pal_sig && cliprect == m_tcvr_tiles_clip && !((m_tcvr_set == 0) ? m_tcvr_back2d : m_tcvr_back2d_b).empty();
 #endif
+	// With the recording thread, a redraw goes into the OTHER set of layers (the thread may still be reading the last one).
+	if (!tiles_hit && offload)
+	{
+		const int ns = 1 - m_tcvr_set;
+		m_tcvr_worker->wait_set_free(ns);
+		m_tcvr_set = ns;
+	}
+	bitmap_rgb32 &sys24 = (m_tcvr_set == 0) ? m_sys24_bitmap : m_sys24_bitmap_b;
+	std::vector<u32> &back2d = (m_tcvr_set == 0) ? m_tcvr_back2d : m_tcvr_back2d_b;
 	// if the scroll color table was written to, we need to refresh the palette
 	if (m_palette_dirty && pal_sig != m_tcvr_pal_sig)
 	{
@@ -3085,17 +3437,17 @@ u32 model2_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, con
 	//logerror("--- frame ---\n");
 	bitmap.fill(m_palette->pen(0), cliprect);
 	if (!tiles_hit)
-		m_sys24_bitmap.fill(0, cliprect);
+		sys24.fill(0, cliprect);
 
 	if (!tiles_hit)
 	{
 	TCVR_EXACT(3);   // tuiles arriere
 	// draw tilemap B as opaque
 	for (int layer = 3; layer >= 2; layer--)
-		m_tiles->draw(screen, m_sys24_bitmap, cliprect, layer << 1, 0, TILEMAP_DRAW_OPAQUE);
+		m_tiles->draw(screen, sys24, cliprect, layer << 1, 0, TILEMAP_DRAW_OPAQUE);
 
 	for (int layer = 1; layer >= 0; layer--)
-		m_tiles->draw(screen, m_sys24_bitmap, cliprect, layer << 1, 0, 0);
+		m_tiles->draw(screen, sys24, cliprect, layer << 1, 0, 0);
 	}
 
 	if (!tiles_hit)
@@ -3107,30 +3459,31 @@ u32 model2_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, con
 		// compose DIRECTEMENT dans le tampon publie : un seul passage, au lieu de copybitmap_trans puis une recopie.
 		const u32 w = cliprect.width(), h = cliprect.height();
 		const u32 bg = m_palette->pen(0);
-		m_tcvr_back2d.resize(size_t(w) * size_t(h));
+		back2d.resize(size_t(w) * size_t(h));
 		for (u32 y = 0; y < h; y++)
 		{
-			const u32 *src = &m_sys24_bitmap.pix(cliprect.top() + y, cliprect.left());
-			u32 *dst = m_tcvr_back2d.data() + size_t(y) * w;
+			const u32 *src = &sys24.pix(cliprect.top() + y, cliprect.left());
+			u32 *dst = back2d.data() + size_t(y) * w;
 			for (u32 x = 0; x < w; x++) dst[x] = src[x] ? src[x] : bg;
 		}
 	}
 	else
 	{
-	copybitmap_trans(bitmap, m_sys24_bitmap, 0, 0, 0, 0, cliprect, 0);
+	copybitmap_trans(bitmap, sys24, 0, 0, 0, 0, cliprect, 0);
 
 	// The frame as it stands before any polygon: this is what a GPU pass has to
 	// composite on. Kept in its own buffer because `bitmap` is about to receive
 	// the CPU rasteriser's 3D on top.
-	m_tcvr_back2d.resize(size_t(cliprect.width()) * size_t(cliprect.height()));
+	back2d.resize(size_t(cliprect.width()) * size_t(cliprect.height()));
 	for (int y = 0; y < cliprect.height(); y++)
-		std::memcpy(m_tcvr_back2d.data() + size_t(y) * cliprect.width(),
+		std::memcpy(back2d.data() + size_t(y) * cliprect.width(),
 		            &bitmap.pix(cliprect.top() + y, cliprect.left()),
 		            size_t(cliprect.width()) * 4);
 	}
 
 	}
 
+	if (!offload)
 	{
 	TCVR_EXACT(5);   // traitement des polygones (render_polygons, enregistrement de la scene en mode 2)
 	/* tell the rasterizer we're starting a frame */
@@ -3143,19 +3496,25 @@ u32 model2_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, con
 	if (!tiles_hit)
 	{
 	TCVR_EXACT(6);   // tuiles avant + copie
-	m_sys24_bitmap.fill(0, cliprect);
+	sys24.fill(0, cliprect);
 
 	for (int layer = 3; layer >= 0; layer--)
-		m_tiles->draw(screen, m_sys24_bitmap, cliprect, (layer<<1) | 1, 0, 0);
+		m_tiles->draw(screen, sys24, cliprect, (layer<<1) | 1, 0, 0);
 
 	if (tcvr_m2_scene_mode() < 2)   // mode 2 : l'image du CPU n'est jamais affichee
-		copybitmap_trans(bitmap, m_sys24_bitmap, 0, 0, 0, 0, cliprect, 0);
+		copybitmap_trans(bitmap, sys24, 0, 0, 0, 0, cliprect, 0);
 	}
 
 	if (!tiles_hit) ++m_tcvr_layers_rev;
 	m_tcvr_tiles_valid = true; m_tcvr_tiles_ver = g_tcvr_tile_version; m_tcvr_pal_sig = pal_sig; m_tcvr_tiles_clip = cliprect;
 	// m_sys24_bitmap now holds exactly the layer that goes over the polygons,
 	// so this is the only point where a complete scene can be published.
+	if (offload)
+	{
+	TCVR_EXACT(7);   // photographie et remise au fil d'enregistrement
+	tcvr_offload_frame(cliprect);
+	}
+	else
 	{
 	TCVR_EXACT(7);   // publication de la scene
 	m_tcvr_bitmap = &bitmap;

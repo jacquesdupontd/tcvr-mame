@@ -1749,13 +1749,15 @@ extern "C" int tcvr_m2_scene_mode(void)
 	return s_m2_scene.enabled.load(std::memory_order_relaxed);
 }
 
+static std::atomic<int> s_m2_raw_off{0};
+extern "C" void tcvr_m2_scene_raw_off(int off) { s_m2_raw_off.store(off, std::memory_order_release); }
 extern "C" void tcvr_m2_scene_begin(int width, int height)
 {
 	if (!s_m2_scene.enabled.load(std::memory_order_relaxed)) { s_m2_scene.recording = false; return; }
 	auto &w = s_m2_scene.slots[s_m2_scene.write_idx];
 	w.vertices.clear();
 	w.prims.clear();
-	if (s_m2_scene.raw_fresh)
+	if (!s_m2_raw_off.load(std::memory_order_acquire) && s_m2_scene.raw_fresh)
 	{
 		s_m2_scene.raw_last_vertices.swap(s_m2_scene.raw_pending_vertices);
 		s_m2_scene.raw_last_prims.swap(s_m2_scene.raw_pending_prims);
@@ -1765,9 +1767,11 @@ extern "C" void tcvr_m2_scene_begin(int width, int height)
 		s_m2_scene.raw_pending_motion.clear();
 		s_m2_scene.raw_fresh = false;
 	}
-	w.raw_vertices = s_m2_scene.raw_last_vertices;
-	w.raw_prims = s_m2_scene.raw_last_prims;
-	w.raw_motion = s_m2_scene.raw_last_motion;
+	if (!s_m2_raw_off.load(std::memory_order_acquire)) {
+		w.raw_vertices = s_m2_scene.raw_last_vertices;
+		w.raw_prims = s_m2_scene.raw_last_prims;
+		w.raw_motion = s_m2_scene.raw_last_motion;
+	} else { w.raw_vertices.clear(); w.raw_prims.clear(); w.raw_motion.clear(); }
 	w.frame.width = width;
 	w.frame.height = height;
 	s_m2_scene.dropped_prims = 0;
@@ -1817,12 +1821,14 @@ extern "C" void tcvr_m2_scene_raw_poly(const tcvr_m2_raw_vertex *v, int count, c
 }
 extern "C" void tcvr_m2_scene_raw_reset(void)
 {
+	if (s_m2_raw_off.load(std::memory_order_acquire)) return;
 	s_m2_scene.raw_pending_vertices.clear();
 	s_m2_scene.raw_pending_prims.clear();
 	s_m2_scene.raw_pending_motion.clear();
 }
 extern "C" void tcvr_m2_scene_raw_commit(void)
 {
+	if (s_m2_raw_off.load(std::memory_order_acquire)) return;
 	s_m2_scene.raw_fresh = true;
 }
 namespace {

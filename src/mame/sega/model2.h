@@ -46,6 +46,7 @@ public:
 	struct geo_state;
 
 	static constexpr feature_type imperfect_features() { return feature::GRAPHICS; }
+	~model2_state() override;
 
 	model2_state(const machine_config &mconfig, device_type type, const char *tag) :
 		driver_device(mconfig, type, tag),
@@ -301,6 +302,8 @@ protected:
 	uint8_t m_tcvr_publish_path = 0;
 	bool m_tcvr_scene_geometry_unchanged = false;
 	std::vector<u32> m_tcvr_back2d;
+	std::vector<u32> m_tcvr_back2d_b;      // second set of 2D layers (double buffer, see tcvr_scene_worker)
+	bitmap_rgb32 m_sys24_bitmap_b;
 	void tcvr_m2_publish_scene(const rectangle &cliprect);
 	void tcvr_tex_mark(unsigned sheet, offs_t word_index)
 	{
@@ -318,6 +321,16 @@ private:
 	unsigned long long m_tcvr_layers_rev = 1;
 	unsigned long long m_tcvr_tiles_ver = 0, m_tcvr_pal_sig = 0;
 	rectangle m_tcvr_tiles_clip;
+	// TCVR : fil d'enregistrement de la scene (model2_v.cpp). L'emulation dessine l'image N+1 pendant que ce fil parcourt les
+	// polygones et publie l'image N : le raster et les couches 2D sont a double tampon. Un pointeur nu : le type est defini
+	// seulement dans model2_v.cpp, et ce constructeur en ligne ne doit pas en avoir besoin.
+	class tcvr_scene_worker;
+	tcvr_scene_worker *m_tcvr_worker = nullptr;
+	std::unique_ptr<raster_state> m_raster_alt;
+	raster_state *m_raster_ptr[2] = { nullptr, nullptr };
+	int m_tcvr_set = 0;                      // set of 2D layers holding the last valid drawing
+	bool tcvr_offload_active();
+	void tcvr_offload_frame(const rectangle &cliprect);
 
 	u32 *geo_process_command( geo_state *geo, u32 opcode, u32 *input, bool *end_code );
 	// geo commands

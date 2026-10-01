@@ -173,6 +173,7 @@ void tcvr_m2_scene_begin(int width, int height);
 void tcvr_m2_scene_poly(const tcvr_m2_vertex *v, int count, const tcvr_m2_prim *p);
 void tcvr_m2_scene_raw_poly(const tcvr_m2_raw_vertex *v, int count, const tcvr_m2_prim *p);
 void tcvr_m2_scene_raw_poly_m(const tcvr_m2_raw_vertex *v, int count, const tcvr_m2_prim *p, const float *motion16);
+void tcvr_m2_scene_raw_off(int off);  // 1: the pre-clip stream is not recorded at all (the Switch's flat window never reads it)
 void tcvr_m2_scene_raw_reset(void);   // the board starts a new display list (render_frame_start)
 // The pending raw list is complete, even if EMPTY: the next begin() takes it (Model 1 records the whole list
 // at the end of the frame; an empty list must replace the previous 3D, not keep it).
