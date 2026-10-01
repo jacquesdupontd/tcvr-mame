@@ -8,6 +8,11 @@
 
 #include <algorithm>
 
+#if defined(__ANDROID__)
+#include <android/log.h>
+#include <sys/system_properties.h>
+#endif
+
 #ifdef _MSC_VER
 /* logb prototype is different for MS Visual C */
 #include <cfloat>
@@ -2203,15 +2208,104 @@ void i960_cpu_device::execute_op(uint32_t opcode)
 
 }
 
+// TCVR (01/10/2026, Daytona USA): exact fast-forward of a busy-wait loop that only re-reads plain memory.
+//
+//   head      ld, ldob, ldos, ldib or ldis  <absolute address>, rA     (MEMB, 32-bit displacement)
+//   head+8    a compare-and-branch (cmpob*, cmpib*, bbc, bbs) on rA, back to head
+//
+// Daytona waits for its next frame at 0x1394 this way (ldob 0x500000,r3 ; cmpibe r3,g0): at every vblank sampled in a
+// race the main CPU was there. While the i960 runs its slice no other device of the machine runs (MAME schedules them
+// one after the other), the loop writes nothing but rA and the condition codes -- the same values at every turn --
+// and the address is RAM or ROM (a handler could depend on time or have side effects: refused). So every remaining
+// turn of the slice is identical: once two consecutive turns cost the same d cycles, k = (icount-1)/d turns are
+// skipped at once and the last <= d cycles run normally -- the slice ends at the same cycle, in the same state, as
+// without the skip. The Switch session's skip of Sega Rally's loop (29/09) is another shape (it counts its turns in a
+// register): this one leaves it alone. debug.tcvr.i960.spinSkip=0 turns it off.
+void i960_cpu_device::tcvr_spin_consider(uint32_t head, uint32_t branch)
+{
+	for (uint32_t r : m_tcvr_spin_rejected)
+		if (r == head)
+			return;
+	const uint32_t ld = m_cache.read_dword(head);
+	const uint32_t addr = m_cache.read_dword(head + 4);
+	const uint32_t br = m_cache.read_dword(branch);
+	const uint32_t op = ld >> 24, bop = br >> 24;
+	const bool load = op == 0x80 || op == 0x88 || op == 0x90 || op == 0xc0 || op == 0xc8;
+	const bool absolute = (ld & 0x00001000) && ((ld >> 10) & 0xf) == 0xc;
+	const uint32_t ra = (ld >> 19) & 0x1f;
+	const bool cobr = bop >= 0x30 && bop <= 0x3f;
+	const bool src1_reg = !(br & 0x00002000);
+	const uint32_t s1 = (br >> 19) & 0x1f, s2 = (br >> 14) & 0x1f;
+	const bool on_ra = (src1_reg && s1 == ra) || s2 == ra;
+	const bool back = branch + uint32_t(util::sext(br, 13)) == head;   // same displacement as the core's branches
+	const bool plain = branch == head + 8 && load && absolute && space(AS_PROGRAM).get_read_ptr(addr) != nullptr;
+	if (!(plain && cobr && on_ra && back)) {
+		m_tcvr_spin_rejected[m_tcvr_spin_rej_pos++ & 7] = head;
+		return;
+	}
+	m_tcvr_spin_ip = head;
+	m_tcvr_spin_br = branch;
+	m_tcvr_spin_code[0] = ld; m_tcvr_spin_code[1] = addr; m_tcvr_spin_code[2] = br;
+	m_tcvr_spin_last_ic = 0;
+	m_tcvr_spin_last_d = 0;
+#if defined(__ANDROID__)
+	__android_log_print(ANDROID_LOG_INFO, "TCVR_IDLE", "%s: i960 wait loop at %08x verified (%08x %08x / %08x: load of plain memory %08x into r%u, compare-and-branch back), skipped exactly from now on",
+		tag(), head, ld, addr, br, addr, ra);
+#endif
+}
+
+void i960_cpu_device::tcvr_spin_step()
+{
+	if (m_PIP != m_tcvr_spin_br) {   // arrived from outside the loop: start measuring a turn
+		m_tcvr_spin_last_ic = m_icount;
+		m_tcvr_spin_last_d = 0;
+		return;
+	}
+	const int d = m_tcvr_spin_last_ic - m_icount;   // cycles of the turn just completed
+	m_tcvr_spin_last_ic = m_icount;
+	if (d > 0 && d == m_tcvr_spin_last_d) {
+		const int k = (m_icount - 1) / d;
+		// code in RAM could have been replaced since it was verified: same three words, or verified again from scratch
+		if (k > 0 && (m_cache.read_dword(m_tcvr_spin_ip) != m_tcvr_spin_code[0] || m_cache.read_dword(m_tcvr_spin_ip + 4) != m_tcvr_spin_code[1] ||
+		              m_cache.read_dword(m_tcvr_spin_br) != m_tcvr_spin_code[2])) {
+			m_tcvr_spin_ip = 0;
+			return;
+		}
+		if (k > 0) {
+			m_icount -= k * d;
+			m_tcvr_spin_skipped += uint64_t(k) * uint64_t(d);
+			m_tcvr_spin_last_ic = m_icount;
+#if defined(__ANDROID__)
+			const attotime now = machine().time();
+			if (now >= m_tcvr_spin_report_at) {
+				if (!m_tcvr_spin_report_at.is_zero())
+					__android_log_print(ANDROID_LOG_INFO, "TCVR_IDLE", "%s: wait loop %08x, %.1f %% of the CPU's cycles skipped over the last 2 s",
+						tag(), m_tcvr_spin_ip, 100.0 * double(m_tcvr_spin_skipped) / (2.0 * double(clock())));
+				m_tcvr_spin_skipped = 0;
+				m_tcvr_spin_report_at = now + attotime::from_seconds(2);
+			}
+#endif
+		}
+	}
+	m_tcvr_spin_last_d = d;
+}
+
 void i960_cpu_device::execute_run()
 {
 	uint32_t opcode;
+	m_tcvr_spin_last_ic = 0;
+	m_tcvr_spin_last_d = 0;
 
 	// delay checking irqs if we are in burst stall mode
 	if(m_stall_state.burst_mode == false)
 		check_immediate_irqs();
 
 	while(m_icount > 0) {
+		if(m_IP == m_tcvr_spin_ip && m_tcvr_spin_ip != 0 && m_stall_state.burst_mode == false) {
+			tcvr_spin_step();
+			if(m_icount <= 0)
+				break;
+		}
 		m_PIP = m_IP;
 		debugger_instruction_hook(m_IP);
 
@@ -2222,8 +2316,12 @@ void i960_cpu_device::execute_run()
 
 		if(m_stall_state.burst_mode == true)
 			execute_burst_stall_op(opcode);
-		else
+		else {
 			execute_op(opcode);
+			// a taken branch two instructions back: a candidate wait loop
+			if(m_tcvr_spin_on && m_IP < m_PIP && m_PIP - m_IP == 8 && m_IP != m_tcvr_spin_ip && !m_stalled)
+				tcvr_spin_consider(m_IP, m_PIP);
+		}
 	}
 }
 
@@ -2305,6 +2403,14 @@ void i960_cpu_device::device_start()
 {
 	space(AS_PROGRAM).cache(m_cache);
 	space(AS_PROGRAM).specific(m_program);
+
+#if defined(__ANDROID__)
+	{
+		// TCVR: exact skip of plain-memory wait loops (tcvr_spin_consider); "" (the bench's release) counts as unset
+		char v[PROP_VALUE_MAX] = {};
+		m_tcvr_spin_on = !(__system_property_get("debug.tcvr.i960.spinSkip", v) > 0 && v[0] == '0');
+	}
+#endif
 
 	save_item(NAME(m_IP));
 	save_item(NAME(m_PIP));

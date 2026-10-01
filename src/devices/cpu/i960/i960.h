@@ -101,6 +101,18 @@ protected:
 private:
 	void burst_stall_save(uint32_t t1, uint32_t t2, int index, int size, bool iswriteop);
 
+	// TCVR (01/10/2026): exact fast-forward of a busy-wait loop that only re-reads plain memory (tcvr_spin_* in i960.cpp)
+	void tcvr_spin_consider(uint32_t head, uint32_t branch);
+	void tcvr_spin_step();
+	bool m_tcvr_spin_on = false;
+	uint32_t m_tcvr_spin_ip = 0, m_tcvr_spin_br = 0;
+	uint32_t m_tcvr_spin_code[3] = {};   // the loop's three words, compared again before every skip
+	uint32_t m_tcvr_spin_rejected[8] = {};
+	unsigned m_tcvr_spin_rej_pos = 0;
+	int m_tcvr_spin_last_ic = 0, m_tcvr_spin_last_d = 0;
+	uint64_t m_tcvr_spin_skipped = 0;   // cycles skipped since the last report
+	attotime m_tcvr_spin_report_at;
+
 	struct {
 		uint32_t t1 = 0, t2 = 0;
 		int index = 0, size = 0;
