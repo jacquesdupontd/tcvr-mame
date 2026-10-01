@@ -9,6 +9,9 @@
 ***************************************************************************/
 
 #include "emu.h"
+#include <map>
+#include <algorithm>
+#include <android/log.h>
 #include "debugger.h"
 #include "screen.h"
 
@@ -665,7 +668,6 @@ void device_execute_interface::device_input::reset()
 void device_execute_interface::device_input::set_state_synced(int state, int vector)
 {
 	LOG(("set_state_synced('%s',%d,%d,%02x)\n", m_execute->device().tag(), m_linenum, state, vector));
-
 	if (TEMPLOG) printf("setline(%s,%d,%d,%d)\n", m_execute->device().tag(), m_linenum, state, (vector == USE_STORED_VECTOR) ? 0 : vector);
 	assert(state == ASSERT_LINE || state == HOLD_LINE || state == CLEAR_LINE);
 

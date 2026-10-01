@@ -273,7 +273,10 @@ void model2_tgp_state::machine_start()
 {
 	model2_state::machine_start();
 
-	m_copro_fifo_in->setup(8,
+	// debug.tcvr.m2.fifoIn / fifoOut : profondeur des FIFO i960 <-> TGP (8 sur la carte). Plus profond = moins de synchronisations
+	// (chaque remplissage / vidage coute une minuterie et un arret/reprise de CPU).
+	auto fifo_depth = [](char const *prop, int def) { char v[PROP_VALUE_MAX] = {}; int n = (__system_property_get(prop, v) > 0 && v[0]) ? atoi(v) : def; return size_t(n < 1 ? 1 : n > 4096 ? 4096 : n); };
+	m_copro_fifo_in->setup(fifo_depth("debug.tcvr.m2.fifoIn", 8),
 						   [this]() { m_copro_tgp->stall(); },
 						   [this]() { m_copro_tgp->set_input_line(INPUT_LINE_HALT, ASSERT_LINE); },
 						   [this]() { m_copro_tgp->set_input_line(INPUT_LINE_HALT, CLEAR_LINE); },
@@ -282,7 +285,7 @@ void model2_tgp_state::machine_start()
 						   [    ]() { },
 						   [    ]() { });
 
-	m_copro_fifo_out->setup(8,
+	m_copro_fifo_out->setup(fifo_depth("debug.tcvr.m2.fifoOut", 8),
 							[this]() { m_maincpu->i960_stall(); },
 							[this]() { m_maincpu->set_input_line(INPUT_LINE_HALT, ASSERT_LINE); },
 							[this]() { m_maincpu->set_input_line(INPUT_LINE_HALT, CLEAR_LINE); },
