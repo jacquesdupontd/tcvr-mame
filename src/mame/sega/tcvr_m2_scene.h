@@ -124,6 +124,8 @@ struct tcvr_m2_frame
 	// CPU where it does not, with incoherent seams between them.
 	const uint32_t *back2d;  uint32_t back2d_stride;
 	const uint32_t *front2d; uint32_t front2d_stride;
+	// Changes whenever the content of back2d or front2d may have changed (0 = unknown: always treat as changed).
+	uint64_t layers_revision;
 	const uint32_t *textureram[2]; uint32_t textureram_words;
 	const uint32_t *dirty[2];      uint32_t dirty_words, dirty_blocks, dirty_block_words;
 	uint64_t dirty_generation;

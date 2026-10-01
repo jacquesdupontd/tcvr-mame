@@ -140,7 +140,7 @@ int tcvr_uart_pulses_per_event()
 	// Default 4 (Nintendo Switch, 29/09): 45% -> 77-82% emulation speed at 1020 MHz; the audio produced is
 	// bit-identical to N=8 and equal to N=1 up to the first sound, then within ~5% (sub-sample note timing).
 	// debug.tcvr.m2.uartN=1 restores MAME's own 500 kHz clock.
-	if (__system_property_get("debug.tcvr.m2.uartN", value) <= 0 || !value[0] || value[0] == '"') return 4;
+	if (__system_property_get("debug.tcvr.m2.uartN", value) <= 0 || !value[0] || value[0] == '"') return 8;
 	int const n = atoi(value);
 	return (n == 2 || n == 4 || n == 8 || n == 16) ? n : 1;
 }

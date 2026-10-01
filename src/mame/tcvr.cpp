@@ -1664,6 +1664,7 @@ struct tcvr_m2_scene_store
 		std::vector<uint8_t> gamma;
 		std::vector<uint32_t> back2d;
 		std::vector<uint32_t> front2d;
+		uint64_t layers_rev = 0;
 		std::vector<uint32_t> dirty[2];
 		tcvr_m2_frame frame{};
 	};
@@ -1879,6 +1880,17 @@ extern "C" void tcvr_m2_scene_end(const tcvr_m2_frame *fp)
 	// tex0_w/tex1_w, so a consumer reads them in place and uses the dirty mask
 	// to know what moved. The masks ARE copied, because the driver clears them
 	// as soon as this frame is published.
+	// Layers unchanged since this slot last held them (same revision, same size): keep its copy, skip the two ~760 KB copies.
+	const size_t layer_px = size_t(fp->width) * size_t(fp->height);
+	const bool layers_same = fp->layers_revision != 0 && w.layers_rev == fp->layers_revision && layer_px != 0 &&
+	                         w.back2d.size() == layer_px && w.front2d.size() == layer_px;
+	if (layers_same)
+	{
+		w.frame.back2d = w.back2d.data();   w.frame.back2d_stride = uint32_t(fp->width);
+		w.frame.front2d = w.front2d.data(); w.frame.front2d_stride = uint32_t(fp->width);
+	}
+	else
+	{
 	if (fp->back2d && fp->back2d_stride && fp->width > 0 && fp->height > 0)
 	{
 		w.back2d.resize(size_t(fp->width) * size_t(fp->height));
@@ -1903,6 +1915,8 @@ extern "C" void tcvr_m2_scene_end(const tcvr_m2_frame *fp)
 		w.frame.front2d_stride = uint32_t(fp->width);
 	}
 	else { w.front2d.clear(); w.frame.front2d = nullptr; w.frame.front2d_stride = 0; }
+		w.layers_rev = fp->layers_revision;
+	}
 
 	for (int sheet = 0; sheet < 2; sheet++)
 	{

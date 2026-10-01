@@ -315,6 +315,7 @@ private:
 	bool m_palette_dirty = false;
 	// TCVR : cache du dessin 2D (voir screen_update) -- valide tant que ni la RAM des tuiles/caracteres ni la palette ne changent
 	bool m_tcvr_tiles_valid = false;
+	unsigned long long m_tcvr_layers_rev = 1;
 	unsigned long long m_tcvr_tiles_ver = 0, m_tcvr_pal_sig = 0;
 	rectangle m_tcvr_tiles_clip;
 

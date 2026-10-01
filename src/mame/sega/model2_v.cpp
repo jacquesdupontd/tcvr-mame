@@ -2946,6 +2946,7 @@ void model2_state::tcvr_m2_publish_scene(const rectangle &cliprect)
 		fp.back2d_stride = u32(cliprect.width());
 		fp.front2d = &m_sys24_bitmap.pix(0);
 		fp.front2d_stride = u32(m_sys24_bitmap.rowpixels());
+		fp.layers_revision = m_tcvr_layers_rev;
 		fp.crtc_xoffset = m_crtc_xoffset;
 		fp.crtc_yoffset = m_crtc_yoffset;
 		fp.geometry_unchanged = m_tcvr_scene_geometry_unchanged ? 1u : 0u;
@@ -3127,6 +3128,7 @@ u32 model2_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, con
 	copybitmap_trans(bitmap, m_sys24_bitmap, 0, 0, 0, 0, cliprect, 0);
 	}
 
+	if (!tiles_hit) ++m_tcvr_layers_rev;
 	m_tcvr_tiles_valid = true; m_tcvr_tiles_ver = g_tcvr_tile_version; m_tcvr_pal_sig = pal_sig; m_tcvr_tiles_clip = cliprect;
 	// m_sys24_bitmap now holds exactly the layer that goes over the polygons,
 	// so this is the only point where a complete scene can be published.
