@@ -2962,7 +2962,8 @@ public:
 		u16 minZ = 0, maxZ = 0;
 	};
 
-	tcvr_scene_worker() : m_thread([this] { run(); }) {}
+	// The thread starts in the BODY: every other member (mutex, condition variables, queue) must already be constructed.
+	tcvr_scene_worker() { m_thread = std::thread([this] { run(); }); }
 	~tcvr_scene_worker()
 	{
 		{ std::lock_guard<std::mutex> l(m_mutex); m_stop = true; }
@@ -3124,7 +3125,6 @@ private:
 		tcvr_m2_scene_end(&fp);
 	}
 
-	std::thread m_thread;
 	std::mutex m_mutex;
 	std::condition_variable m_cvWork, m_cvDone;
 	std::deque<Job *> m_queue;
@@ -3132,6 +3132,7 @@ private:
 	int m_next = 0, m_inflight = 0;
 	int m_rasterBusy[2] = { 0, 0 }, m_setBusy[2] = { 0, 0 };
 	bool m_stop = false;
+	std::thread m_thread;   // declared LAST
 };
 
 model2_state::~model2_state()
@@ -3148,15 +3149,28 @@ bool model2_state::tcvr_offload_active()
 	// Hors Switch : active seulement a la demande (banc natif, ThreadSanitizer).
 	static const bool want = [] { char v[PROP_VALUE_MAX] = {}; return __system_property_get("debug.tcvr.m2.worker", v) > 0 && v[0] == '1'; }();
 #endif
-	if (!want || tcvr_m2_scene_mode() < 2 || m_render_test_mode)
+	static bool failed = false;
+	if (!want || failed || tcvr_m2_scene_mode() < 2 || m_render_test_mode)
 		return false;
 	if (!m_tcvr_worker)
 	{
-		m_raster_alt = std::make_unique<raster_state>();
-		m_raster_ptr[0] = m_raster.get();
-		m_raster_ptr[1] = m_raster_alt.get();
-		tcvr_m2_scene_raw_off(1);
-		m_tcvr_worker = new tcvr_scene_worker();
+		try
+		{
+			m_raster_alt = std::make_unique<raster_state>();
+			m_raster_ptr[0] = m_raster.get();
+			m_raster_ptr[1] = m_raster_alt.get();
+			m_tcvr_worker = new tcvr_scene_worker();
+			tcvr_m2_scene_raw_off(1);
+			__android_log_print(ANDROID_LOG_INFO, "TCVR_MODEL2", "scene worker started (raster double buffer, 2D layer sets)");
+		}
+		catch (...)
+		{
+			failed = true;   // no thread, no memory: stay on the inline path
+			delete m_tcvr_worker; m_tcvr_worker = nullptr;
+			m_raster_alt.reset(); m_raster_ptr[0] = m_raster_ptr[1] = nullptr;
+			__android_log_print(ANDROID_LOG_ERROR, "TCVR_MODEL2", "scene worker unavailable, recording inline");
+			return false;
+		}
 	}
 	return true;
 }
