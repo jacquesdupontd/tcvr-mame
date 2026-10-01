@@ -168,6 +168,11 @@ Sega PC BD MODEL2 C-CRX COMMUNICATION 837-12839
 #include "emuopts.h"
 #include "m2comm.h"
 
+#if defined(__ANDROID__)
+#include <sys/system_properties.h>
+#include <cstring>
+#endif
+
 #define VERBOSE 0
 #include "logmacro.h"
 
@@ -222,6 +227,21 @@ m2comm_device::m2comm_device(const machine_config &mconfig, const char *tag, dev
 
 void m2comm_device::device_start()
 {
+#if defined(__ANDROID__)
+	// TCVR (01/10, Daytona USA stuck on "NETWORK CHECKING / THIS IS MASTER CONTROLLER"): a headset never has a linked
+	// cabinet. On the PC the sockets open and stay silent, and each game's ORIGINAL code settles on stand-alone ("1 player",
+	// measured on the PC build); on Android they never open and the comm flag never toggles. The solo ring -- the
+	// sockets "open but silent" -- was Super GT's alone (init_sgt24h); now every game with the board, Sega Rally excepted
+	// (validated as it is). debug.tcvr.m2comm.link=1 keeps the real sockets.
+	char v[PROP_VALUE_MAX] = {};
+	const bool wantLink = __system_property_get("debug.tcvr.m2comm.link", v) > 0 && v[0] == '1';
+	const char *const name = machine().system().name;
+	const char *const parent = machine().system().parent;
+	const bool segaRally = !std::strcmp(name, "srallyc") || (parent && !std::strcmp(parent, "srallyc"));
+	if (!wantLink && !segaRally)
+		m_tcvr_solo = true;
+	osd_printf_verbose("M2COMM: %s\n", m_tcvr_solo ? "solo ring (TCVR: no linked cabinet on a headset)" : "sockets");
+#endif
 }
 
 //-------------------------------------------------
