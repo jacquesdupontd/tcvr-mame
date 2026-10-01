@@ -38,6 +38,21 @@ bool tcvr_uart_pulse_on()
 #endif
 }
 
+// debug.tcvr.m2.uartN: pulses per clock event (1, 2 or 4), the same switch as the Model 2 main board's (model2.cpp)
+int tcvr_uart_pulses()
+{
+#if defined(__ANDROID__)
+	char value[PROP_VALUE_MAX] = {};
+	if (__system_property_get("debug.tcvr.m2.uartN", value) <= 0 || !value[0] || value[0] == '"') return 1;
+	int const n = atoi(value);
+	return (n == 1 || n == 2 || n == 4) ? n : 1;
+#else
+	return 1;
+#endif
+}
+
+int g_tcvr_m1_uart_n = 1;
+
 } // anonymous namespace
 
 void segam1audio_device::segam1audio_map(address_map &map)
@@ -103,7 +118,8 @@ void segam1audio_device::device_add_mconfig(machine_config &config)
 
 	if (tcvr_uart_pulse_on())
 	{
-		clock_device &uart_clock(CLOCK(config, "uart_clock", 16_MHz_XTAL / 2 / 32));
+		g_tcvr_m1_uart_n = tcvr_uart_pulses();
+		clock_device &uart_clock(CLOCK(config, "uart_clock", 16_MHz_XTAL / 2 / 32 / g_tcvr_m1_uart_n));
 		uart_clock.signal_handler().set(FUNC(segam1audio_device::tcvr_uart_pulse_w));
 	}
 	else
@@ -177,10 +193,13 @@ void segam1audio_device::write_txd(int state)
 
 void segam1audio_device::tcvr_uart_pulse_w(int state)
 {
-	m_uart->write_txc(1);
-	m_uart->write_rxc(1);   // rising: receive
-	m_uart->write_txc(0);   // falling: transmit
-	m_uart->write_rxc(0);
+	for (int i = 0; i < g_tcvr_m1_uart_n; i++)
+	{
+		m_uart->write_txc(1);
+		m_uart->write_rxc(1);   // rising: receive
+		m_uart->write_txc(0);   // falling: transmit
+		m_uart->write_rxc(0);
+	}
 }
 
 void segam1audio_device::output_txd(int state)

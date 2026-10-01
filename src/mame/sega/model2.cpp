@@ -129,6 +129,18 @@ static bool tcvr_prop_flag(char const *name, bool fallback)
 	return value[0] == '1';
 }
 
+// debug.tcvr.m2.uartN (01/10): UART pulses delivered per clock event on the edge-pulse clocks below (1, 2 or 4);
+// unset = the path's own (model2o 1, 2B/2C 2). The i8251 samples in the middle of a 32 us bit by counting 16 pulses:
+// 4 pulses per event delivers them in groups of 8 us, the sample then falls 16-24 us into the bit -- inside it. 8
+// would put it at the bit's edge: refused. The Switch session measured 4 against 8 bit-identical in sound (29/09).
+int tcvr_uart_pulses(int fallback)
+{
+	char value[PROP_VALUE_MAX] = {};
+	if (__system_property_get("debug.tcvr.m2.uartN", value) <= 0 || !value[0] || value[0] == '"') return fallback;
+	int const n = atoi(value);
+	return (n == 1 || n == 2 || n == 4) ? n : fallback;
+}
+
 bool tcvr_cabinet_cpus_requested()
 {
 	// __system_property_get() returns 0 and leaves the buffer empty when the
@@ -139,6 +151,8 @@ bool tcvr_cabinet_cpus_requested()
 
 }  // anonymous namespace
 #endif
+
+int g_tcvr_uart_n = 1;   // pulses per UART clock event, set when the machine is configured (tcvr_uart_pulsen_w)
 
 /* Timers - these count down at 25 MHz and pull IRQ2 when they hit 0 */
 u32 model2_state::timers_r(offs_t offset)
@@ -2681,8 +2695,9 @@ void model2o_state::model2o(machine_config &config)
 	// the events (transmit 1 us earlier inside a 32 us bit). debug.tcvr.m2.uartPulse=0 restores MAME's clock.
 	if (tcvr_prop_flag("debug.tcvr.m2.uartPulse", true))
 	{
-		clock_device &uart_clock(CLOCK(config, "uart_clock", 16_MHz_XTAL / 2 / 32));
-		uart_clock.signal_handler().set(FUNC(model2o_state::tcvr_uart_pulse_w));
+		g_tcvr_uart_n = tcvr_uart_pulses(1);
+		clock_device &uart_clock(CLOCK(config, "uart_clock", 16_MHz_XTAL / 2 / 32 / g_tcvr_uart_n));
+		uart_clock.signal_handler().set(FUNC(model2o_state::tcvr_uart_pulsen_w));
 	}
 	else
 	{
@@ -2692,6 +2707,12 @@ void model2o_state::model2o(machine_config &config)
 	}
 
 	M2COMM(config, "m2comm");
+}
+
+void model2_state::tcvr_uart_pulsen_w(int state)
+{
+	for (int i = 0; i < g_tcvr_uart_n; i++)
+		tcvr_uart_pulse_w(state);
 }
 
 void model2_state::tcvr_uart_pulse2_w(int state)
@@ -3015,8 +3036,9 @@ void model2b_state::model2b(machine_config &config)
 	if (tcvr_prop_flag("debug.tcvr.m2.uartPulse", true))
 	{
 		config.device_remove("uart_clock");
-		clock_device &uart_clock(CLOCK(config, "uart_clock", 125000));
-		uart_clock.signal_handler().set(FUNC(model2b_state::tcvr_uart_pulse2_w));
+		g_tcvr_uart_n = tcvr_uart_pulses(2);
+		clock_device &uart_clock(CLOCK(config, "uart_clock", 250000 / g_tcvr_uart_n));
+		uart_clock.signal_handler().set(FUNC(model2b_state::tcvr_uart_pulsen_w));
 	}
 
 	M2COMM(config, "m2comm");
@@ -3174,8 +3196,9 @@ void model2c_state::model2c(machine_config &config)
 		config.device_remove("uart_clock");
 		// Two full pulses per toggle at a quarter of the rate (25/09): same pulses per second for the i8251, a
 		// quarter of the events (Top Skater at 97-99 % with one pulse per toggle: the music's pitch wavered).
-		clock_device &uart_clock(CLOCK(config, "uart_clock", 125000));
-		uart_clock.signal_handler().set(FUNC(model2c_state::tcvr_uart_pulse2_w));
+		g_tcvr_uart_n = tcvr_uart_pulses(2);
+		clock_device &uart_clock(CLOCK(config, "uart_clock", 250000 / g_tcvr_uart_n));
+		uart_clock.signal_handler().set(FUNC(model2c_state::tcvr_uart_pulsen_w));
 	}
 
 	M2COMM(config, "m2comm");

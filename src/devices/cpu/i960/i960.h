@@ -107,6 +107,9 @@ private:
 	bool m_tcvr_spin_on = false;
 	uint32_t m_tcvr_spin_ip = 0, m_tcvr_spin_br = 0;
 	uint32_t m_tcvr_spin_code[3] = {};   // the loop's three words, compared again before every skip
+	struct tcvr_spin_loop { uint32_t head = 0, branch = 0, code[3] = {}; };
+	tcvr_spin_loop m_tcvr_spin_known[8];   // verified loops: a game alternates between several (Daytona: 4, twice a frame)
+	unsigned m_tcvr_spin_known_n = 0, m_tcvr_spin_known_pos = 0;
 	uint32_t m_tcvr_spin_rejected[8] = {};
 	unsigned m_tcvr_spin_rej_pos = 0;
 	int m_tcvr_spin_last_ic = 0, m_tcvr_spin_last_d = 0;

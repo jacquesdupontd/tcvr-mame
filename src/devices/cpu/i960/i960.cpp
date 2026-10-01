@@ -2226,6 +2226,22 @@ void i960_cpu_device::tcvr_spin_consider(uint32_t head, uint32_t branch)
 	for (uint32_t r : m_tcvr_spin_rejected)
 		if (r == head)
 			return;
+	// already verified (the game comes back to it every frame): same three words -> active again, silently
+	for (unsigned i = 0; i < m_tcvr_spin_known_n; i++) {
+		tcvr_spin_loop &kl = m_tcvr_spin_known[i];
+		if (kl.head != head || kl.branch != branch)
+			continue;
+		if (m_cache.read_dword(head) == kl.code[0] && m_cache.read_dword(head + 4) == kl.code[1] && m_cache.read_dword(branch) == kl.code[2]) {
+			m_tcvr_spin_ip = head;
+			m_tcvr_spin_br = branch;
+			std::copy(std::begin(kl.code), std::end(kl.code), std::begin(m_tcvr_spin_code));
+			m_tcvr_spin_last_ic = 0;
+			m_tcvr_spin_last_d = 0;
+			return;
+		}
+		kl = m_tcvr_spin_known[--m_tcvr_spin_known_n];   // its code changed: forget it, verify from scratch below
+		break;
+	}
 	const uint32_t ld = m_cache.read_dword(head);
 	const uint32_t addr = m_cache.read_dword(head + 4);
 	const uint32_t br = m_cache.read_dword(branch);
@@ -2248,6 +2264,10 @@ void i960_cpu_device::tcvr_spin_consider(uint32_t head, uint32_t branch)
 	m_tcvr_spin_code[0] = ld; m_tcvr_spin_code[1] = addr; m_tcvr_spin_code[2] = br;
 	m_tcvr_spin_last_ic = 0;
 	m_tcvr_spin_last_d = 0;
+	{
+		tcvr_spin_loop &kl = m_tcvr_spin_known[m_tcvr_spin_known_n < 8 ? m_tcvr_spin_known_n++ : (m_tcvr_spin_known_pos++ & 7)];
+		kl.head = head; kl.branch = branch; kl.code[0] = ld; kl.code[1] = addr; kl.code[2] = br;
+	}
 #if defined(__ANDROID__)
 	__android_log_print(ANDROID_LOG_INFO, "TCVR_IDLE", "%s: i960 wait loop at %08x verified (%08x %08x / %08x: load of plain memory %08x into r%u, compare-and-branch back), skipped exactly from now on",
 		tag(), head, ld, addr, br, addr, ra);
