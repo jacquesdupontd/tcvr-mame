@@ -145,6 +145,19 @@ int tcvr_uart_pulses_per_event()
 	return (n == 2 || n == 4 || n == 8 || n == 16) ? n : 1;
 }
 int g_tcvr_uart_n = 1;
+// Event-driven UART clock (Switch default): measured, the transmitter and the receiver are idle in play (0 busy pulses out of
+// 500 000 a second), yet every pulse ended a scheduler slice. debug.tcvr.m2.uartLazy=0 restores the pulse train.
+static bool g_tcvr_uart_lazy = false;
+static bool tcvr_uart_lazy_requested()
+{
+#if defined(__SWITCH__)
+	char v[PROP_VALUE_MAX] = {};
+	return !(__system_property_get("debug.tcvr.m2.uartLazy", v) > 0 && v[0] == '0');
+#else
+	char v[PROP_VALUE_MAX] = {};
+	return __system_property_get("debug.tcvr.m2.uartLazy", v) > 0 && v[0] == '1';
+#endif
+}
 
 bool tcvr_cabinet_cpus_requested()
 {
@@ -245,13 +258,25 @@ void model2_state::machine_start()
 
 	m_irq_delay_timer = timer_alloc(FUNC(model2_state::irq_mask_delayed_update), this);
 	m_irq_delay_timer->adjust(attotime::never);
+
+	if (g_tcvr_uart_lazy)
+	{
+		m_uart_tick = timer_alloc(FUNC(model2_state::tcvr_uart_tick), this);
+		m_uart->tcvr_set_wake([this] { tcvr_uart_wake(); });
+		m_uart_sleeping = true;      // starts asleep at grid index 0; the first wake catches up and resumes
+		m_uart_grid = 0;
+		tcvr_uart_wake();
+	}
 }
 
 void model2_tgp_state::machine_start()
 {
 	model2_state::machine_start();
 
-	m_copro_fifo_in->setup(8,
+	// debug.tcvr.m2.fifoIn / fifoOut : profondeur des FIFO i960 <-> TGP (8 sur la carte). Plus profond = moins de synchronisations
+	// (chaque remplissage / vidage coute une minuterie et un arret/reprise de CPU).
+	auto fifo_depth = [](char const *prop, int def) { char v[PROP_VALUE_MAX] = {}; int n = (__system_property_get(prop, v) > 0 && v[0]) ? atoi(v) : def; return size_t(n < 1 ? 1 : n > 4096 ? 4096 : n); };
+	m_copro_fifo_in->setup(fifo_depth("debug.tcvr.m2.fifoIn", 8),
 						   [this]() { m_copro_tgp->stall(); },
 						   [this]() { m_copro_tgp->set_input_line(INPUT_LINE_HALT, ASSERT_LINE); },
 						   [this]() { m_copro_tgp->set_input_line(INPUT_LINE_HALT, CLEAR_LINE); },
@@ -260,7 +285,7 @@ void model2_tgp_state::machine_start()
 						   [    ]() { },
 						   [    ]() { });
 
-	m_copro_fifo_out->setup(8,
+	m_copro_fifo_out->setup(fifo_depth("debug.tcvr.m2.fifoOut", 8),
 							[this]() { m_maincpu->i960_stall(); },
 							[this]() { m_maincpu->set_input_line(INPUT_LINE_HALT, ASSERT_LINE); },
 							[this]() { m_maincpu->set_input_line(INPUT_LINE_HALT, CLEAR_LINE); },
@@ -2670,7 +2695,12 @@ void model2_state::model2_scsp(machine_config &config)
 #if defined(__ANDROID__)
 	g_tcvr_uart_n = tcvr_uart_pulses_per_event();
 #endif
-	if (g_tcvr_uart_n > 1)
+	g_tcvr_uart_lazy = tcvr_uart_lazy_requested();
+	if (g_tcvr_uart_lazy)
+	{
+		// no clock device: tcvr_uart_tick() delivers the pulses, only while the UART has something to do
+	}
+	else if (g_tcvr_uart_n > 1)
 	{
 		// N pulses per toggle at 250 kHz / N: the same 500k pulses a second as MAME's clock, N times fewer events.
 		clock_device &uart_clock(CLOCK(config, "uart_clock", 250000 / g_tcvr_uart_n));
@@ -2739,6 +2769,45 @@ void model2o_state::model2o(machine_config &config)
 	}
 
 	M2COMM(config, "m2comm");
+}
+
+static constexpr u32 kUartGridHz = 500000;   // MAME's 500 kHz UART clock: one pulse (receive edge + transmit edge) every 2 us
+void model2_state::tcvr_uart_wake()
+{
+	if (!m_uart_tick)
+		return;
+	if (!m_uart_sleeping)
+	{
+		m_uart_idle_run = 0;
+		return;
+	}
+	// Asleep: the pulses that would have elapsed only advanced the transmit counter. Catch it up, then resume on the same grid.
+	const u64 now = machine().time().as_ticks(kUartGridHz);
+	if (now > m_uart_grid)
+	{
+		m_uart->tcvr_skip_ticks(now - m_uart_grid);
+		m_uart_grid = now;
+	}
+	m_uart_sleeping = false;
+	m_uart_idle_run = 0;
+	m_uart_tick->adjust(attotime::from_ticks(m_uart_grid + 1, kUartGridHz) - machine().time());
+}
+
+TIMER_CALLBACK_MEMBER(model2_state::tcvr_uart_tick)
+{
+	m_uart_grid++;
+	tcvr_uart_pulse_w(0);
+	if (m_uart->tcvr_idle())
+	{
+		if (++m_uart_idle_run >= 40)   // a full transmit counter wrap (16) and more, all idle: nothing left to settle
+		{
+			m_uart_sleeping = true;
+			return;
+		}
+	}
+	else
+		m_uart_idle_run = 0;
+	m_uart_tick->adjust(attotime::from_ticks(m_uart_grid + 1, kUartGridHz) - machine().time());
 }
 
 void model2_state::tcvr_uart_pulsen_w(int)

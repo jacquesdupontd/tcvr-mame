@@ -233,6 +233,12 @@ protected:
 	void tcvr_uart_pulse_w(int state);
 	void tcvr_uart_pulse2_w(int state);
 	void tcvr_uart_pulsen_w(int state);
+	void tcvr_uart_wake();
+	TIMER_CALLBACK_MEMBER(tcvr_uart_tick);
+	emu_timer *m_uart_tick = nullptr;
+	u64 m_uart_grid = 0;
+	bool m_uart_sleeping = false;
+	int m_uart_idle_run = 0;
 	template <int TNum> TIMER_DEVICE_CALLBACK_MEMBER(model2_timer_cb);
 	void scsp_irq(offs_t offset, u8 data);
 	TIMER_CALLBACK_MEMBER(irq_mask_delayed_update);

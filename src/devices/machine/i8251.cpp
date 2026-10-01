@@ -745,6 +745,7 @@ void i8251_device::sync2_w(uint8_t data)
 
 void i8251_device::control_w(uint8_t data)
 {
+	if (m_tcvr_wake) m_tcvr_wake();
 	if (m_flags == I8251_NEXT_SYNC1)
 		sync1_w(data);
 	else if (m_flags == I8251_NEXT_SYNC2)
@@ -781,6 +782,7 @@ uint8_t i8251_device::status_r()
 
 void i8251_device::data_w(uint8_t data)
 {
+	if (m_tcvr_wake) m_tcvr_wake();
 	m_tx_data = data;
 
 	LOG("data_w %02x\n", data);
@@ -867,6 +869,7 @@ void i8251_device::write(offs_t offset, uint8_t data)
 void i8251_device::write_rxd(int state)
 {
 	m_rxd = state ? 1 : 0;
+	if (m_tcvr_wake) m_tcvr_wake();
 	LOGBITS("8251: Presented a %d\n", m_rxd);
 	//device_serial_interface::rx_w(m_rxd);
 }
@@ -874,6 +877,7 @@ void i8251_device::write_rxd(int state)
 void i8251_device::write_cts(int state)
 {
 	m_cts = state ? 1 : 0;
+	if (m_tcvr_wake) m_tcvr_wake();
 
 	if (started())
 	{
@@ -991,4 +995,32 @@ void v5x_scu_device::write(offs_t offset, uint8_t data)
 	case 2: mode_w(data); break;
 	case 3: simk_w(data); break;
 	}
+}
+
+
+// ---- TCVR : horloge a la demande -------------------------------------------------------------------------------------
+// Idle = the clock pulses would change nothing. Receiver: not in the middle of a character and the line idles high (a low line
+// is a start bit to sample). Transmitter: its register is empty, the empty flag is already up, nothing is waiting to be sent.
+bool i8251_device::tcvr_idle() const
+{
+	if (BIT(m_command, 2) && (is_receive_register_synchronized() || m_rxd == 0))
+		return false;
+	if (!is_transmit_register_empty())
+		return false;
+	if ((m_status & I8251_STATUS_TX_READY) == 0 && (is_tx_enabled() || m_delayed_tx_en))
+		return false;
+	if ((m_status & I8251_STATUS_TX_EMPTY) == 0)
+		return false;
+	if (m_sync_byte_count > 0 && is_tx_enabled())
+		return false;
+	return true;
+}
+
+// The transmit counter runs every pulse whether or not anything is sent; after a sleep it must read as if it had kept running.
+void i8251_device::tcvr_skip_ticks(uint64_t ticks)
+{
+	if (m_br_factor > 0)
+		m_txc_count = int((uint64_t(m_txc_count) + ticks) % uint64_t(m_br_factor));
+	else
+		m_txc_count += int(ticks);
 }

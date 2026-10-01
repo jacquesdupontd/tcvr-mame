@@ -13,6 +13,8 @@
 
 #pragma once
 
+#include <functional>
+
 #include "diserial.h"
 
 class i8251_device : public device_t, public device_serial_interface
@@ -39,6 +41,12 @@ public:
 	virtual void write(offs_t offset, uint8_t data);
 
 	void write_rxd(int state);
+
+	// TCVR : horloge a la demande. Quand l'UART est inactif (rien a emettre, rien en cours de reception, ligne au repos) les
+	// impulsions d'horloge ne changent aucun etat : le pilote cesse de les envoyer, et rattrape le compteur d'emission au reveil.
+	void tcvr_set_wake(std::function<void()> f) { m_tcvr_wake = std::move(f); }
+	bool tcvr_idle() const;
+	void tcvr_skip_ticks(uint64_t ticks);
 	void write_cts(int state);
 	void write_dsr(int state);
 	void write_txc(int state);
@@ -123,6 +131,7 @@ private:
 	int32_t m_txc;
 	int m_rxc_count;
 	int m_txc_count;
+	std::function<void()> m_tcvr_wake;
 	int m_br_factor;
 
 	uint8_t m_rx_data;         // data being received
