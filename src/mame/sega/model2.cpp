@@ -282,6 +282,8 @@ void model2_state::machine_start()
 // le point de synchronisation des donnees comme sur la carte. L'ordre des mots est identique a celui de
 // l'emulation sequentielle ; seule la date (en temps emule) a laquelle l'i960 les voit change.
 // debug.tcvr.m2.tgpthread=1 pour l'activer.
+extern "C" __attribute__((weak)) void tcvr_tgp_started(void);
+
 class model2_state::tcvr_tgp_thread
 {
 public:
@@ -419,6 +421,7 @@ private:
 	}
 	void loop()
 	{
+		if (tcvr_tgp_started) tcvr_tgp_started();   // (Switch : le profileur retrouve ce fil)
 		for (;;)
 		{
 			{
