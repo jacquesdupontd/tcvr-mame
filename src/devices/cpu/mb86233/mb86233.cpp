@@ -554,58 +554,40 @@ void mb86233_device::alu_post_2(u32 alu)
 	}
 }
 
+// Calcul d'adresse sans branches (l'ARM A57 rate beaucoup les sauts indirects des deux `switch` imbriques) :
+//  mode = (r >> 7) & 3 ; 0 : r & 0x7f ; 1 et 2 : (r & 0x7f) + b + x ; 3 : sous-mode (r >> 5) & 3 : b + x, x, b + (x & vsmr), x & vsmr
+static inline u16 tcvr_ea(u32 r, u16 b, u16 x, u16 vsmr)
+{
+	const u32 mode = (r >> 7) & 3;
+	const u32 sub = (r >> 5) & 3;
+	const u32 low = (mode != 3) ? (r & 0x7f) : 0;
+	const u32 useb = (mode == 1) | (mode == 2) | ((mode == 3) & ((sub & 1) == 0));
+	const u32 maskx = (mode == 3 && sub >= 2) ? vsmr : 0xffffu;
+	return u16(low + (useb ? b : 0) + (mode != 0 ? (x & maskx) : 0));
+}
+
 u16 mb86233_device::ea_pre_0(u32 r)
 {
-	switch(r & 0x180) {
-	case 0x000: return r & 0x7f;
-	case 0x080: case 0x100: return (r & 0x7f) + m_b0 + m_x0;
-	case 0x180: {
-		switch(r & 0x60) {
-		case 0x00: return m_b0 + m_x0;
-		case 0x20: return m_x0;
-		case 0x40: return m_b0 + (m_x0 & m_vsmr);
-		case 0x60: return m_x0 & m_vsmr;
-		}
-	}
-	}
-	return 0;
+	return tcvr_ea(r, m_b0, m_x0, m_vsmr);
 }
 
 void mb86233_device::ea_post_0(u32 r)
 {
 	if(!(r & 0x100))
 		return;
-	if(!(r & 0x080))
-		m_x0 += m_i0;
-	else
-		m_x0 += util::sext(r, 5);
+	m_x0 += (r & 0x080) ? util::sext(r, 5) : m_i0;
 }
 
 u16 mb86233_device::ea_pre_1(u32 r)
 {
-	switch(r & 0x180) {
-	case 0x000: return r & 0x7f;
-	case 0x080: case 0x100: return (r & 0x7f) + m_b1 + m_x1;
-	case 0x180: {
-		switch(r & 0x60) {
-		case 0x00: return m_b1 + m_x1;
-		case 0x20: return m_x1;
-		case 0x40: return m_b1 + (m_x1 & m_vsmr);
-		case 0x60: return m_x1 & m_vsmr;
-		}
-	}
-	}
-	return 0;
+	return tcvr_ea(r, m_b1, m_x1, m_vsmr);
 }
 
 void mb86233_device::ea_post_1(u32 r)
 {
 	if(!(r & 0x100))
 		return;
-	if(!(r & 0x080))
-		m_x1 += m_i1;
-	else
-		m_x1 += util::sext(r, 5);
+	m_x1 += (r & 0x080) ? util::sext(r, 5) : m_i1;
 }
 
 u32 mb86233_device::read_reg(u32 r)
