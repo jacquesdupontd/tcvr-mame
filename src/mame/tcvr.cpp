@@ -561,6 +561,42 @@ private:
 				pf("debug.tcvr.in.rx", rx);
 				pf("debug.tcvr.in.lt", lt);
 				pf("debug.tcvr.in.rt", rt);
+				// debug.tcvr.record=1 : ecrit les entrees de CHAQUE image de jeu dans /switch/segarally/replay.bin ;
+				// debug.tcvr.replay=1 : les rejoue a l'identique (le jeu est deterministe : meme course, memes polygones).
+				{
+					struct rec { float steer, gas, brake; uint32_t bits; };
+					static const bool recording = [] { char b[PROP_VALUE_MAX] = {}; return __system_property_get("debug.tcvr.record", b) > 0 && b[0] == '1'; }();
+					static const bool replaying = [] { char b[PROP_VALUE_MAX] = {}; return __system_property_get("debug.tcvr.replay", b) > 0 && b[0] == '1'; }();
+					static std::vector<rec> frames;
+					static bool loaded = false;
+					const uint32_t cur = uint32_t(coin) | (uint32_t(start) << 1) | (uint32_t(view) << 2) | (uint32_t(shift_up) << 3) | (uint32_t(shift_down) << 4) | (uint32_t(pedal) << 5) | (uint32_t(trigger) << 6);
+					if (recording)
+					{
+						frames.push_back({ steer, gas, brake, cur });
+						if ((frames.size() % 300) == 0)   // flushed regularly: the run may end abruptly
+							if (FILE *f = std::fopen("/switch/segarally/replay.bin", "wb")) { std::fwrite(frames.data(), sizeof(rec), frames.size(), f); std::fclose(f); }
+					}
+					if (replaying)
+					{
+						if (!loaded)
+						{
+							loaded = true;
+							if (FILE *f = std::fopen("/switch/segarally/replay.bin", "rb"))
+							{
+								rec r;
+								while (std::fread(&r, sizeof r, 1, f) == 1) frames.push_back(r);
+								std::fclose(f);
+							}
+							__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_REPLAY %zu images chargees", frames.size());
+						}
+						if (!frames.empty())
+						{
+							const rec &r = frames[std::min<size_t>(m_frame_count, frames.size() - 1)];
+							steer = r.steer; gas = r.gas; brake = r.brake;
+							coin = r.bits & 1; start = (r.bits >> 1) & 1; view = (r.bits >> 2) & 1; shift_up = (r.bits >> 3) & 1; shift_down = (r.bits >> 4) & 1; pedal = (r.bits >> 5) & 1; trigger = (r.bits >> 6) & 1;
+						}
+					}
+				}
 				// debug.tcvr.in.pulse=1 : une pièce (10 images) puis start (10 images) toutes les 300 images, comme un joueur
 				{
 					static unsigned pf2 = 0; static const bool pulse = [] { char b[PROP_VALUE_MAX] = {}; return __system_property_get("debug.tcvr.in.pulse", b) > 0 && b[0] == '1'; }();
