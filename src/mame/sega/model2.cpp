@@ -451,7 +451,12 @@ private:
 
 static bool tcvr_tgp_thread_wanted()
 {
+#if defined(__SWITCH__)
+	// Switch : actif par defaut (mesure : course lourde 45-58 -> 59-60 images/s) ; =0 pour l'ancien comportement sequentiel
+	static const bool want = [] { char v[PROP_VALUE_MAX] = {}; return !(__system_property_get("debug.tcvr.m2.tgpthread", v) > 0 && v[0] == '0'); }();
+#else
 	static const bool want = [] { char v[PROP_VALUE_MAX] = {}; return __system_property_get("debug.tcvr.m2.tgpthread", v) > 0 && v[0] == '1'; }();
+#endif
 	return want;
 }
 #endif
