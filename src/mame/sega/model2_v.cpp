@@ -3181,6 +3181,7 @@ private:
 
 model2_state::~model2_state()
 {
+	tcvr_tgp_destroy();   // le fil TGP lit bufferram : il s'arrete d'abord
 	delete m_tcvr_worker;   // joins the thread: nothing may still read the rasters or the layers
 	m_tcvr_worker = nullptr;
 }

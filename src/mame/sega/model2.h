@@ -332,6 +332,9 @@ private:
 	// seulement dans model2_v.cpp, et ce constructeur en ligne ne doit pas en avoir besoin.
 	class tcvr_scene_worker;
 	tcvr_scene_worker *m_tcvr_worker = nullptr;
+	class tcvr_tgp_thread;                  // TGP (MB86234) execute par un fil dedie, voir model2.cpp
+	tcvr_tgp_thread *m_tcvr_tgp = nullptr;
+	void tcvr_tgp_destroy();
 	std::unique_ptr<raster_state> m_raster_alt;
 	raster_state *m_raster_ptr[2] = { nullptr, nullptr };
 	int m_tcvr_set = 0;                      // set of 2D layers holding the last valid drawing
@@ -417,6 +420,8 @@ protected:
 	void copro_function_port_w(offs_t offset, u32 data);
 	u32 copro_fifo_r();
 	void copro_fifo_w(u32 data);
+	u32 copro_tgp_fifo_in_r();
+	void copro_tgp_fifo_out_w(u32 data);
 	void tex0_w(offs_t offset, u32 data);
 	void tex1_w(offs_t offset, u32 data);
 

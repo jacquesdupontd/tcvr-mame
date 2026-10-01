@@ -269,9 +269,182 @@ void model2_state::machine_start()
 	}
 }
 
+
+#if defined(__ANDROID__)
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
+
+// TCVR : le TGP (MB86234, ~25 % du temps de l'emulation) tourne sur son propre fil, hors ordonnanceur.
+// Il ne parle au reste de la carte que par les deux FIFO et par bufferram : ce sont des anneaux sans verrou
+// (un producteur, un consommateur) dont les indices servent de barriere acquire/release, ce qui fait des FIFO
+// le point de synchronisation des donnees comme sur la carte. L'ordre des mots est identique a celui de
+// l'emulation sequentielle ; seule la date (en temps emule) a laquelle l'i960 les voit change.
+// debug.tcvr.m2.tgpthread=1 pour l'activer.
+class model2_state::tcvr_tgp_thread
+{
+public:
+	explicit tcvr_tgp_thread(mb86234_device &dev) : m_dev(dev) { m_thread = std::thread([this] { loop(); }); }
+	~tcvr_tgp_thread()
+	{
+		{ std::lock_guard<std::mutex> l(m_mtx); m_quit = true; m_want_run = false; }
+		m_cv.notify_all();
+		if (m_thread.joinable()) m_thread.join();
+	}
+
+	// ---- cote i960 ----
+	void push_in(u32 v)
+	{
+		const u32 h = m_in_h.load(std::memory_order_relaxed);
+		while (h - m_in_t.load(std::memory_order_acquire) >= N)
+		{
+			if (!m_want_run.load()) return;          // TGP arrete : plus personne ne vide, on perd (jamais vu en pratique)
+			std::this_thread::yield();
+		}
+		m_in[h & (N - 1)] = v;
+		m_in_h.store(h + 1, std::memory_order_release);
+		wake_tgp();
+	}
+	bool pop_out(u32 &v)
+	{
+		u32 t = m_out_t.load(std::memory_order_relaxed);
+		for (int spin = 0; m_out_h.load(std::memory_order_acquire) == t; ++spin)
+		{
+			if (spin > 200) return false;
+			std::this_thread::yield();
+		}
+		v = m_out[t & (N - 1)];
+		m_out_t.store(t + 1, std::memory_order_release);
+		return true;
+	}
+	bool out_empty() const { return m_out_h.load(std::memory_order_acquire) == m_out_t.load(std::memory_order_acquire); }
+
+	void halt()
+	{
+		std::unique_lock<std::mutex> l(m_mtx);
+		m_want_run = false;
+		m_cv.notify_all();
+		m_cv_state.wait(l, [this] { return m_parked; });
+	}
+	void boot()
+	{
+		halt();
+		m_dev.tcvr_reset_state();
+		{ std::lock_guard<std::mutex> l(m_mtx); m_want_run = true; }
+		m_cv.notify_all();
+	}
+	void clear_rings()   // fil arrete
+	{
+		m_in_h = m_in_t = 0; m_out_h = m_out_t = 0;
+	}
+
+	// ---- cote TGP (appeles par les gestionnaires de la carte, depuis le fil TGP) ----
+	u32 in_read()
+	{
+		const u32 t = m_in_t.load(std::memory_order_relaxed);
+		if (m_in_h.load(std::memory_order_acquire) == t)
+		{
+			wait_in(t);
+			if (m_in_h.load(std::memory_order_acquire) == t) { m_dev.stall(); return 0; }
+		}
+		const u32 v = m_in[t & (N - 1)];
+		m_in_t.store(t + 1, std::memory_order_release);
+		return v;
+	}
+	void out_write(u32 v)
+	{
+		const u32 h = m_out_h.load(std::memory_order_relaxed);
+		if (h - m_out_t.load(std::memory_order_acquire) >= N)
+		{
+			// anneau de sortie plein : l'i960 doit en lire ; on attend un peu puis on rejoue l'instruction
+			for (int i = 0; i < 200 && h - m_out_t.load(std::memory_order_acquire) >= N && m_want_run.load(); ++i)
+				std::this_thread::yield();
+			if (h - m_out_t.load(std::memory_order_acquire) >= N) { m_dev.stall(); return; }
+		}
+		m_out[h & (N - 1)] = v;
+		m_out_h.store(h + 1, std::memory_order_release);
+	}
+
+private:
+	static constexpr u32 N = 1u << 16;
+
+	void wake_tgp()
+	{
+		std::atomic_thread_fence(std::memory_order_seq_cst);
+		if (m_sleeping.load(std::memory_order_relaxed))
+		{
+			{ std::lock_guard<std::mutex> l(m_mtx); }
+			m_cv.notify_all();
+		}
+	}
+	void wait_in(u32 t)
+	{
+		for (int i = 0; i < 400; ++i)
+		{
+			if (m_in_h.load(std::memory_order_acquire) != t || !m_want_run.load(std::memory_order_relaxed)) return;
+#if defined(__aarch64__)
+			asm volatile("yield");
+#endif
+		}
+		std::unique_lock<std::mutex> l(m_mtx);
+		m_sleeping = true;
+		std::atomic_thread_fence(std::memory_order_seq_cst);
+		if (m_in_h.load(std::memory_order_acquire) == t && m_want_run.load() && !m_quit)
+			m_cv.wait_for(l, std::chrono::microseconds(500));
+		m_sleeping = false;
+	}
+	void loop()
+	{
+		for (;;)
+		{
+			{
+				std::unique_lock<std::mutex> l(m_mtx);
+				m_parked = true;
+				m_cv_state.notify_all();
+				m_cv.wait(l, [this] { return m_want_run.load() || m_quit.load(); });
+				if (m_quit) return;
+				m_parked = false;
+			}
+			while (m_want_run.load() && !m_quit.load())
+				m_dev.tcvr_run(2048);
+		}
+	}
+
+	mb86234_device &m_dev;
+	std::mutex m_mtx;
+	std::condition_variable m_cv, m_cv_state;
+	std::atomic<bool> m_want_run{ false }, m_quit{ false }, m_sleeping{ false };
+	bool m_parked = true;
+	alignas(64) std::atomic<u32> m_in_h{ 0 }, m_in_t{ 0 };
+	alignas(64) std::atomic<u32> m_out_h{ 0 }, m_out_t{ 0 };
+	u32 m_in[N], m_out[N];
+	std::thread m_thread;   // declare en dernier : demarre quand tout le reste existe
+};
+
+static bool tcvr_tgp_thread_wanted()
+{
+	static const bool want = [] { char v[PROP_VALUE_MAX] = {}; return __system_property_get("debug.tcvr.m2.tgpthread", v) > 0 && v[0] == '1'; }();
+	return want;
+}
+#endif
+
+void model2_state::tcvr_tgp_destroy()
+{
+#if defined(__ANDROID__)
+	delete m_tcvr_tgp;
+	m_tcvr_tgp = nullptr;
+#endif
+}
+
 void model2_tgp_state::machine_start()
 {
 	model2_state::machine_start();
+
+#if defined(__ANDROID__)
+	if (tcvr_tgp_thread_wanted() && !m_tcvr_tgp)
+		m_tcvr_tgp = new tcvr_tgp_thread(*m_copro_tgp);
+#endif
 
 	// debug.tcvr.m2.fifoIn / fifoOut : profondeur des FIFO i960 <-> TGP (8 sur la carte). Plus profond = moins de synchronisations
 	// (chaque remplissage / vidage coute une minuterie et un arret/reprise de CPU).
@@ -415,6 +588,15 @@ void model2_tgp_state::machine_reset()
 	model2_state::machine_reset();
 
 	// hold TGP in halt until we have code
+#if defined(__ANDROID__)
+	if (m_tcvr_tgp)
+	{
+		m_tcvr_tgp->halt();
+		m_tcvr_tgp->clear_rings();
+		m_copro_tgp->suspend(SUSPEND_REASON_DISABLE, true);   // l'ordonnanceur ne l'execute plus : c'est le fil qui le fait
+		return;
+	}
+#endif
 	m_copro_tgp->set_input_line(INPUT_LINE_HALT, ASSERT_LINE);
 }
 
@@ -490,6 +672,10 @@ unsigned long g_tcvr_copro_push=0, g_tcvr_copro_pop=0;
 u32 model2_state::fifo_control_r()
 {
 	extern unsigned long g_tcvr_rd_fifo; ++g_tcvr_rd_fifo;
+#if defined(__ANDROID__)
+	if (m_tcvr_tgp)
+		return m_tcvr_tgp->out_empty() ? 1 : 0;
+#endif
 	return m_copro_fifo_out->is_empty() ? 1 : 0;
 }
 
@@ -576,9 +762,30 @@ void model2_tgp_state::copro_tgp_io_map(address_map &map)
 void model2_tgp_state::copro_tgp_rf_map(address_map &map)
 {
 	map(0x0, 0x0).nopw(); // leds? busy flag?
-	map(0x1, 0x1).r(m_copro_fifo_in, FUNC(generic_fifo_u32_device::read));
-	map(0x2, 0x2).w(m_copro_fifo_out, FUNC(generic_fifo_u32_device::write));
+	map(0x1, 0x1).r(FUNC(model2_tgp_state::copro_tgp_fifo_in_r));
+	map(0x2, 0x2).w(FUNC(model2_tgp_state::copro_tgp_fifo_out_w));
 	map(0x3, 0x3).w(FUNC(model2_tgp_state::copro_tgp_bank_w));
+}
+
+u32 model2_tgp_state::copro_tgp_fifo_in_r()
+{
+#if defined(__ANDROID__)
+	if (m_tcvr_tgp)
+		return m_tcvr_tgp->in_read();
+#endif
+	return m_copro_fifo_in->read();
+}
+
+void model2_tgp_state::copro_tgp_fifo_out_w(u32 data)
+{
+#if defined(__ANDROID__)
+	if (m_tcvr_tgp)
+	{
+		m_tcvr_tgp->out_write(data);
+		return;
+	}
+#endif
+	m_copro_fifo_out->write(data);
 }
 
 u32 model2_tgp_state::copro_tgp_memory_r(offs_t offset)
@@ -705,17 +912,24 @@ void model2_tgp_state::copro_function_port_w(offs_t offset, u32 data)
 	d |= a << 23;
 #if defined(__ANDROID__)
 	{ extern unsigned long g_tcvr_copro_pop; ++g_tcvr_copro_pop; }
+	if (m_tcvr_tgp) { m_tcvr_tgp->push_in(u32(d)); return; }
 #endif
 	m_copro_fifo_in->push(u32(d));
 }
 
 void model2_tgp_state::copro_halt()
 {
+#if defined(__ANDROID__)
+	if (m_tcvr_tgp) { m_tcvr_tgp->halt(); return; }
+#endif
 	m_copro_tgp->set_input_line(INPUT_LINE_HALT, ASSERT_LINE);
 }
 
 void model2_tgp_state::copro_boot()
 {
+#if defined(__ANDROID__)
+	if (m_tcvr_tgp) { m_tcvr_tgp->boot(); return; }
+#endif
 	m_copro_tgp->set_input_line(INPUT_LINE_HALT, CLEAR_LINE);
 	m_copro_tgp->pulse_input_line(INPUT_LINE_RESET, attotime::zero);
 }
@@ -724,6 +938,13 @@ u32 model2_tgp_state::copro_fifo_r()
 {
 #if defined(__ANDROID__)
 	{ extern unsigned long g_tcvr_copro_push; ++g_tcvr_copro_push; }
+	if (m_tcvr_tgp)
+	{
+		u32 v = 0;
+		if (!m_tcvr_tgp->pop_out(v))
+			m_maincpu->i960_stall();   // rien encore : on rejoue la lecture (le temps emule avance, le TGP finit son travail)
+		return v;
+	}
 #endif
 	return m_copro_fifo_out->pop();
 }
@@ -735,6 +956,10 @@ void model2_tgp_state::copro_fifo_w(u32 data)
 		m_copro_tgp_program[m_coprocnt] = data;
 		m_coprocnt++;
 	}
+#if defined(__ANDROID__)
+	else if (m_tcvr_tgp)
+		m_tcvr_tgp->push_in(u32(data));
+#endif
 	else
 		m_copro_fifo_in->push(u32(data));
 }

@@ -62,6 +62,10 @@ public:
 
 	void stall() { m_stall = true; }
 
+	// TCVR : execution par un fil dedie (hors ordonnanceur) ; ces deux appels ne servent qu'a lui
+	void tcvr_reset_state() { device_reset(); }
+	void tcvr_run(int cycles) { m_icount = cycles; execute_run(); }
+
 	void gpio0_w(int state);
 	void gpio1_w(int state);
 	void gpio2_w(int state);
