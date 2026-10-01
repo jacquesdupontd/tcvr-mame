@@ -518,31 +518,85 @@ void segas24_tile_device::draw(screen_device &screen, bitmap_ind16 &bitmap, cons
 void segas24_tile_device::draw(screen_device &screen, bitmap_rgb32 &bitmap, const rectangle &cliprect, int layer, int lpri, int flags)
 { draw_common(screen, bitmap, cliprect, layer, lpri, flags); }
 
+uint16_t segas24_tile_device::tcvr_overlay(bool is_char, offs_t offset) const
+{
+	uint16_t v = is_char ? char_ram[offset] : tile_ram[offset];
+	for (const tcvr_pending &e : m_tcvr_pending)
+		if (e.offset == offset && e.is_char == is_char)
+			v = (v & ~e.mask) | (e.data & e.mask);
+	return v;
+}
+
 uint16_t segas24_tile_device::tile_r(offs_t offset)
 {
-	return tile_ram[offset];
+	return m_tcvr_pending.empty() ? tile_ram[offset] : tcvr_overlay(false, offset);
 }
 
 uint16_t segas24_tile_device::char_r(offs_t offset)
 {
-	return char_ram[offset];
+	return m_tcvr_pending.empty() ? char_ram[offset] : tcvr_overlay(true, offset);
 }
 
 unsigned long long g_tcvr_tile_version = 0;   // incremente a chaque ecriture qui CHANGE la RAM des tuiles ou des caracteres
-void segas24_tile_device::tile_w(offs_t offset, uint16_t data, uint16_t mem_mask)
+
+bool segas24_tile_device::tile_apply(offs_t offset, uint16_t data, uint16_t mem_mask)
 {
-	{ uint16_t before = tile_ram[offset]; COMBINE_DATA(tile_ram.get() + offset); if (tile_ram[offset] != before) ++g_tcvr_tile_version; }
+	const uint16_t before = tile_ram[offset];
+	COMBINE_DATA(tile_ram.get() + offset);
 	if(offset < 0x4000)
 		tile_layer[offset >> 12]->mark_tile_dirty(offset & 0xfff);
+	return tile_ram[offset] != before;
 }
 
-void segas24_tile_device::char_w(offs_t offset, uint16_t data, uint16_t mem_mask)
+bool segas24_tile_device::char_apply(offs_t offset, uint16_t data, uint16_t mem_mask)
 {
 	uint16_t old = char_ram[offset];
 	COMBINE_DATA(char_ram.get() + offset);
 	if(old != char_ram[offset]) {
-		++g_tcvr_tile_version;
 		gfx(char_gfx_index)->mark_dirty(offset / 16);
+		return true;
+	}
+	return false;
+}
+
+void segas24_tile_device::tile_w(offs_t offset, uint16_t data, uint16_t mem_mask)
+{
+	if(m_tcvr_busy.load(std::memory_order_acquire) || !m_tcvr_pending.empty()) {
+		const uint16_t cur = tcvr_overlay(false, offset);
+		if(((cur & ~mem_mask) | (data & mem_mask)) != cur)
+			++g_tcvr_tile_version;
+		m_tcvr_pending.push_back({ uint32_t(offset), data, mem_mask, false });
+		return;
+	}
+	if(tile_apply(offset, data, mem_mask))
+		++g_tcvr_tile_version;
+}
+
+void segas24_tile_device::char_w(offs_t offset, uint16_t data, uint16_t mem_mask)
+{
+	if(m_tcvr_busy.load(std::memory_order_acquire) || !m_tcvr_pending.empty()) {
+		const uint16_t cur = tcvr_overlay(true, offset);
+		if(((cur & ~mem_mask) | (data & mem_mask)) != cur)
+			++g_tcvr_tile_version;
+		m_tcvr_pending.push_back({ uint32_t(offset), data, mem_mask, true });
+		return;
+	}
+	if(char_apply(offset, data, mem_mask))
+		++g_tcvr_tile_version;
+}
+
+// Replays the writes set aside during a draw, in order. Only called by the emulation thread with no draw in progress.
+void segas24_tile_device::tcvr_flush()
+{
+	if(m_tcvr_pending.empty())
+		return;
+	std::vector<tcvr_pending> list;
+	list.swap(m_tcvr_pending);
+	for(const tcvr_pending &e : list) {
+		if(e.is_char)
+			char_apply(e.offset, e.data, e.mask);
+		else
+			tile_apply(e.offset, e.data, e.mask);
 	}
 }
 

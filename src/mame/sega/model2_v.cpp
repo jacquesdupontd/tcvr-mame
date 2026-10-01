@@ -2926,6 +2926,30 @@ void model2_state::video_start()
 
 
 
+
+// The 2D layers of a mode-2 frame (steps 3, 4 and 6 of screen_update): the layers behind the polygons composed straight into
+// `back2d`, then the priority layers into `sys24`. Used by the recording thread; the inline path keeps its own copy of this code.
+static void tcvr_draw_tiles(segas24_tile_device &tiles, screen_device &screen, bitmap_rgb32 &sys24, std::vector<u32> &back2d,
+                            const rectangle &cliprect, u32 bg)
+{
+	sys24.fill(0, cliprect);
+	for (int layer = 3; layer >= 2; layer--)
+		tiles.draw(screen, sys24, cliprect, layer << 1, 0, TILEMAP_DRAW_OPAQUE);
+	for (int layer = 1; layer >= 0; layer--)
+		tiles.draw(screen, sys24, cliprect, layer << 1, 0, 0);
+	const u32 w = cliprect.width(), h = cliprect.height();
+	back2d.resize(size_t(w) * size_t(h));
+	for (u32 y = 0; y < h; y++)
+	{
+		const u32 *src = &sys24.pix(cliprect.top() + y, cliprect.left());
+		u32 *dst = back2d.data() + size_t(y) * w;
+		for (u32 x = 0; x < w; x++) dst[x] = src[x] ? src[x] : bg;
+	}
+	sys24.fill(0, cliprect);
+	for (int layer = 3; layer >= 0; layer--)
+		tiles.draw(screen, sys24, cliprect, (layer << 1) | 1, 0, 0);
+}
+
 // =====================================================================================================================
 // TCVR : fil d'enregistrement de la scene (Switch, mode 2)
 //
@@ -2953,8 +2977,15 @@ public:
 		const u32 *tex0 = nullptr, *tex1 = nullptr;
 		u32 dirty[2][TCVR_TEX_BLOCKS / 32] = {};
 		u64 dirtyGen = 0, layersRev = 0;
-		const u32 *back2d = nullptr, *front2d = nullptr;
+		const u32 *front2d = nullptr;
 		u32 front2dStride = 0;
+		std::vector<u32> *back2dVec = nullptr;
+		// 2D layers drawn by the thread itself (a redraw frame): everything it needs
+		bool drawTiles = false;
+		segas24_tile_device *tiles = nullptr;
+		screen_device *screen = nullptr;
+		bitmap_rgb32 *sys24 = nullptr;
+		u32 bgPen = 0;
 		bool geometryUnchanged = false;
 		double emuTime = 0;
 		u32 frameNo = 0;
@@ -2984,6 +3015,7 @@ public:
 	{
 		{
 			std::lock_guard<std::mutex> l(m_mutex);
+			if (j.drawTiles) m_tilesBusy++;
 			if (j.kind == Job::Normal) m_rasterBusy[j.rasterIdx]++;
 			m_setBusy[j.set]++;
 			m_inflight++;
@@ -2995,6 +3027,11 @@ public:
 	{
 		std::unique_lock<std::mutex> l(m_mutex);
 		m_cvDone.wait(l, [&] { return m_setBusy[s] == 0; });
+	}
+	void wait_tiles_idle()
+	{
+		std::unique_lock<std::mutex> l(m_mutex);
+		m_cvDone.wait(l, [&] { return m_tilesBusy == 0; });
 	}
 	void wait_raster_free(int r)
 	{
@@ -3085,8 +3122,15 @@ private:
 		tcvr_m2_scene_poly(tv, tn, &tp);
 	}
 
-	static void process(Job &j)
+	void process(Job &j)
 	{
+		if (j.drawTiles)
+		{
+			tcvr_draw_tiles(*j.tiles, *j.screen, *j.sys24, *j.back2dVec, j.cliprect, j.bgPen);
+			j.tiles->tcvr_set_busy(false);   // the game's tile writes are replayed by the emulation thread
+			{ std::lock_guard<std::mutex> l(m_mutex); m_tilesBusy--; }
+			m_cvDone.notify_all();
+		}
 		tcvr_m2_scene_begin(j.width, j.height);
 		if (j.kind == Job::Normal && j.raster)
 		{
@@ -3114,7 +3158,7 @@ private:
 		fp.dirty_blocks = TCVR_TEX_BLOCKS;
 		fp.dirty_block_words = TCVR_TEX_BLOCK_WORDS;
 		fp.dirty_generation = j.dirtyGen;
-		fp.back2d = j.back2d;   fp.back2d_stride = uint32_t(j.width);
+		fp.back2d = (j.back2dVec && !j.back2dVec->empty()) ? j.back2dVec->data() : nullptr;   fp.back2d_stride = uint32_t(j.width);
 		fp.front2d = j.front2d; fp.front2d_stride = j.front2dStride;
 		fp.layers_revision = j.layersRev;
 		fp.crtc_xoffset = j.crtcX;
@@ -3130,7 +3174,7 @@ private:
 	std::deque<Job *> m_queue;
 	Job m_jobs[3];
 	int m_next = 0, m_inflight = 0;
-	int m_rasterBusy[2] = { 0, 0 }, m_setBusy[2] = { 0, 0 };
+	int m_rasterBusy[2] = { 0, 0 }, m_setBusy[2] = { 0, 0 }, m_tilesBusy = 0;
 	bool m_stop = false;
 	std::thread m_thread;   // declared LAST
 };
@@ -3204,7 +3248,7 @@ static void tcvr_copy_raster_state(model2_state::raster_state &d, const model2_s
 }
 
 // Replaces render_polygons() + tcvr_m2_publish_scene() in mode 2: photograph, hand over, move on.
-void model2_state::tcvr_offload_frame(const rectangle &cliprect)
+void model2_state::tcvr_offload_frame(const rectangle &cliprect, bool draw_tiles)
 {
 	tcvr_scene_worker &w = *m_tcvr_worker;
 	raster_state *cur = m_raster.get();
@@ -3235,8 +3279,19 @@ void model2_state::tcvr_offload_frame(const rectangle &cliprect)
 	j.set = m_tcvr_set;
 	std::vector<u32> &back2d = (m_tcvr_set == 0) ? m_tcvr_back2d : m_tcvr_back2d_b;
 	bitmap_rgb32 &sys24 = (m_tcvr_set == 0) ? m_sys24_bitmap : m_sys24_bitmap_b;
-	j.back2d = back2d.empty() ? nullptr : back2d.data();
+	j.back2dVec = &back2d;
 	j.front2d = &sys24.pix(0);
+	j.drawTiles = draw_tiles;
+	if (draw_tiles)
+	{
+		j.tiles = m_tiles;
+		j.screen = m_screen;
+		j.sys24 = &sys24;
+		j.bgPen = m_palette->pen(0);
+		m_tiles->tcvr_set_busy(true);
+	}
+	else
+		j.tiles = nullptr;
 	j.front2dStride = u32(sys24.rowpixels());
 	j.layersRev = m_tcvr_layers_rev;
 	j.geometryUnchanged = m_tcvr_scene_geometry_unchanged;
@@ -3410,6 +3465,12 @@ u32 model2_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, con
 	// redessine rien : m_tcvr_back2d (fond) et m_sys24_bitmap (couche avant) gardent le resultat de l'image precedente.
 	// debug.tcvr.m2.tileCache=0 desactive.
 	const bool offload = tcvr_offload_active();
+	if (offload)
+	{
+		// The previous frame's 2D layers may still be drawing: wait, then replay the game's tile writes set aside meanwhile.
+		m_tcvr_worker->wait_tiles_idle();
+		m_tiles->tcvr_flush();
+	}
 	bool tiles_hit = false;
 	unsigned long long pal_sig = 1469598103934665603ull;
 	{
@@ -3450,10 +3511,10 @@ u32 model2_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, con
 
 	//logerror("--- frame ---\n");
 	bitmap.fill(m_palette->pen(0), cliprect);
-	if (!tiles_hit)
+	if (!tiles_hit && !offload)
 		sys24.fill(0, cliprect);
 
-	if (!tiles_hit)
+	if (!tiles_hit && !offload)
 	{
 	TCVR_EXACT(3);   // tuiles arriere
 	// draw tilemap B as opaque
@@ -3464,7 +3525,7 @@ u32 model2_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, con
 		m_tiles->draw(screen, sys24, cliprect, layer << 1, 0, 0);
 	}
 
-	if (!tiles_hit)
+	if (!tiles_hit && !offload)
 	{
 	TCVR_EXACT(4);   // copie vers le bitmap + sauvegarde du fond 2D
 	if (tcvr_m2_scene_mode() >= 2)
@@ -3507,7 +3568,7 @@ u32 model2_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, con
 		render_polygons(bitmap, cliprect);
 	}
 
-	if (!tiles_hit)
+	if (!tiles_hit && !offload)
 	{
 	TCVR_EXACT(6);   // tuiles avant + copie
 	sys24.fill(0, cliprect);
@@ -3526,7 +3587,7 @@ u32 model2_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, con
 	if (offload)
 	{
 	TCVR_EXACT(7);   // photographie et remise au fil d'enregistrement
-	tcvr_offload_frame(cliprect);
+	tcvr_offload_frame(cliprect, !tiles_hit);
 	}
 	else
 	{

@@ -336,7 +336,7 @@ private:
 	raster_state *m_raster_ptr[2] = { nullptr, nullptr };
 	int m_tcvr_set = 0;                      // set of 2D layers holding the last valid drawing
 	bool tcvr_offload_active();
-	void tcvr_offload_frame(const rectangle &cliprect);
+	void tcvr_offload_frame(const rectangle &cliprect, bool draw_tiles);
 
 	u32 *geo_process_command( geo_state *geo, u32 opcode, u32 *input, bool *end_code );
 	// geo commands
