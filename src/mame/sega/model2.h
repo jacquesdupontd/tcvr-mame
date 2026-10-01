@@ -313,6 +313,10 @@ protected:
 private:
 	int16_t m_crtc_xoffset = 0, m_crtc_yoffset = 0;
 	bool m_palette_dirty = false;
+	// TCVR : cache du dessin 2D (voir screen_update) -- valide tant que ni la RAM des tuiles/caracteres ni la palette ne changent
+	bool m_tcvr_tiles_valid = false;
+	unsigned long long m_tcvr_tiles_ver = 0, m_tcvr_pal_sig = 0;
+	rectangle m_tcvr_tiles_clip;
 
 	u32 *geo_process_command( geo_state *geo, u32 opcode, u32 *input, bool *end_code );
 	// geo commands

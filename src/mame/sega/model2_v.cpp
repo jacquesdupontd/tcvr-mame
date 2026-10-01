@@ -3035,14 +3035,32 @@ void model2_state::tcvr_m2_publish_scene(const rectangle &cliprect)
 	}
 }
 
+extern unsigned long long g_tcvr_tile_version;
 u32 model2_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, const rectangle &cliprect)
 {
 #if defined(__ANDROID__)
 	const bool tcvr_profile = tcvr_model2_profile_enabled();
 	const auto tcvr_screen_start = tcvr_profile ? tcvr_clock::now() : tcvr_clock::time_point{};
 #endif
+	// TCVR (mode 2 : la scene est dessinee par le GPU) : le dessin 2D est une fonction pure de la RAM des tuiles, de celle
+	// des caracteres, de la palette et de la fenetre. Mesure : 88 a 99 % des images ne changent rien. Dans ce cas on ne
+	// redessine rien : m_tcvr_back2d (fond) et m_sys24_bitmap (couche avant) gardent le resultat de l'image precedente.
+	// debug.tcvr.m2.tileCache=0 desactive.
+	bool tiles_hit = false;
+	unsigned long long pal_sig = 1469598103934665603ull;
+	{
+		auto mix = [&](u64 v) { pal_sig = (pal_sig ^ v) * 1099511628211ull; };
+		for (int i = 0; i < 0x1000; i++) mix(m_palram[i]);
+		for (int c = 0; c < 32; c++) { mix(m_colorxlat[0x0080 / 2 + c * 0x100]); mix(m_colorxlat[0x4080 / 2 + c * 0x100]); mix(m_colorxlat[0x8080 / 2 + c * 0x100]); }
+		for (int i = 0; i < 256; i++) mix(m_gamma_table[i]);
+	}
+#if defined(__ANDROID__)
+	static const bool tile_cache = [] { char v[PROP_VALUE_MAX] = {}; return !(__system_property_get("debug.tcvr.m2.tileCache", v) > 0 && v[0] == '0'); }();
+	tiles_hit = tile_cache && tcvr_m2_scene_mode() >= 2 && m_tcvr_tiles_valid && g_tcvr_tile_version == m_tcvr_tiles_ver &&
+	            pal_sig == m_tcvr_pal_sig && cliprect == m_tcvr_tiles_clip && !m_tcvr_back2d.empty();
+#endif
 	// if the scroll color table was written to, we need to refresh the palette
-	if (m_palette_dirty)
+	if (m_palette_dirty && pal_sig != m_tcvr_pal_sig)
 	{
 		for (int i = 0; i < 0x1000; i++)
 		{
@@ -3059,8 +3077,10 @@ u32 model2_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, con
 
 	//logerror("--- frame ---\n");
 	bitmap.fill(m_palette->pen(0), cliprect);
-	m_sys24_bitmap.fill(0, cliprect);
+	if (!tiles_hit)
+		m_sys24_bitmap.fill(0, cliprect);
 
+	if (!tiles_hit)
 	{
 	TCVR_EXACT(3);   // tuiles arriere
 	// draw tilemap B as opaque
@@ -3071,6 +3091,7 @@ u32 model2_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, con
 		m_tiles->draw(screen, m_sys24_bitmap, cliprect, layer << 1, 0, 0);
 	}
 
+	if (!tiles_hit)
 	{
 	TCVR_EXACT(4);   // copie vers le bitmap + sauvegarde du fond 2D
 	copybitmap_trans(bitmap, m_sys24_bitmap, 0, 0, 0, 0, cliprect, 0);
@@ -3095,6 +3116,7 @@ u32 model2_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, con
 		render_polygons(bitmap, cliprect);
 	}
 
+	if (!tiles_hit)
 	{
 	TCVR_EXACT(6);   // tuiles avant + copie
 	m_sys24_bitmap.fill(0, cliprect);
@@ -3105,6 +3127,7 @@ u32 model2_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, con
 	copybitmap_trans(bitmap, m_sys24_bitmap, 0, 0, 0, 0, cliprect, 0);
 	}
 
+	m_tcvr_tiles_valid = true; m_tcvr_tiles_ver = g_tcvr_tile_version; m_tcvr_pal_sig = pal_sig; m_tcvr_tiles_clip = cliprect;
 	// m_sys24_bitmap now holds exactly the layer that goes over the polygons,
 	// so this is the only point where a complete scene can be published.
 	{
