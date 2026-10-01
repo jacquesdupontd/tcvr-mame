@@ -332,9 +332,11 @@ private:
 	// seulement dans model2_v.cpp, et ce constructeur en ligne ne doit pas en avoir besoin.
 	class tcvr_scene_worker;
 	tcvr_scene_worker *m_tcvr_worker = nullptr;
+protected:
 	class tcvr_tgp_thread;                  // TGP (MB86234) execute par un fil dedie, voir model2.cpp
 	tcvr_tgp_thread *m_tcvr_tgp = nullptr;
 	void tcvr_tgp_destroy();
+private:
 	std::unique_ptr<raster_state> m_raster_alt;
 	raster_state *m_raster_ptr[2] = { nullptr, nullptr };
 	int m_tcvr_set = 0;                      // set of 2D layers holding the last valid drawing
