@@ -897,7 +897,9 @@ void model2_state::render_polygons(bitmap_rgb32 &bitmap, const rectangle &clipre
 	// if the geometrizer hasn't presented a new frame, just copy the previous frame and bail
 	if (m_render_done)
 	{
-		copybitmap_trans(bitmap, m_renderer->destmap(), 0, 0, 0, 0, cliprect, 0x00000000);
+		// mode 2 : l'image du CPU n'est jamais affichee, la copie est inutile
+		if (tcvr_m2_scene_mode() < 2)
+			copybitmap_trans(bitmap, m_renderer->destmap(), 0, 0, 0, 0, cliprect, 0x00000000);
 		// Still open a recording, so the frame gets published with empty
 		// geometry and geometry_unchanged set. Without this, the consumer's
 		// image freezes on an old scene while the 2D layers keep moving.
@@ -924,11 +926,15 @@ void model2_state::render_polygons(bitmap_rgb32 &bitmap, const rectangle &clipre
 
 	// Async path: destmap still holds the frame the workers just finished, so
 	// publish it now -- it is about to be cleared for the new one.
-	if (tcvr_async)
-		copybitmap_trans(bitmap, m_renderer->destmap(), 0, 0, 0, 0, cliprect, 0x00000000);
+	// (mode 2 : ni la copie ni l'effacement : rien ne lit destmap ni fillmap, le rastériseur CPU est coupe)
+	if (tcvr_m2_scene_mode() < 2)
+	{
+		if (tcvr_async)
+			copybitmap_trans(bitmap, m_renderer->destmap(), 0, 0, 0, 0, cliprect, 0x00000000);
 
-	m_renderer->destmap().fill(0x00000000, cliprect);
-	m_renderer->fillmap().fill(0x00, cliprect);
+		m_renderer->destmap().fill(0x00000000, cliprect);
+		m_renderer->fillmap().fill(0x00, cliprect);
+	}
 
 #if defined(__ANDROID__)
 	{
