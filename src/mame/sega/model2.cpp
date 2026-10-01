@@ -283,6 +283,12 @@ void model2_state::machine_start()
 // l'emulation sequentielle ; seule la date (en temps emule) a laquelle l'i960 les voit change.
 // debug.tcvr.m2.tgpthread=1 pour l'activer.
 extern "C" __attribute__((weak)) void tcvr_tgp_started(void);
+extern "C" __attribute__((weak)) int __android_log_print(int prio, const char *tag, const char *fmt, ...);
+static void tcvr_tgp_report(unsigned long long run_ns, unsigned long long wait_ns)
+{
+	if (__android_log_print)
+		__android_log_print(4, "TGPTHREAD", "TGP : dans l'interpreteur %.0f ms, dont attente %.0f ms, utile %.0f ms", run_ns / 1e6, wait_ns / 1e6, (run_ns - wait_ns) / 1e6);
+}
 
 class model2_state::tcvr_tgp_thread
 {
@@ -404,6 +410,8 @@ private:
 	}
 	void wait_in(u32 t)
 	{
+		const auto tw0 = std::chrono::steady_clock::now();
+		struct acc { std::chrono::steady_clock::time_point t0; unsigned long long &sum; ~acc() { sum += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count(); } } guard{ tw0, m_wait_ns };
 		// attente active d'abord (m_spin_us) : un reveil de fil coute des dizaines de microsecondes et l'i960 attend souvent la reponse
 		const auto t0 = std::chrono::steady_clock::now();
 		for (int i = 0;; ++i)
@@ -432,8 +440,18 @@ private:
 				if (m_quit) return;
 				m_parked = false;
 			}
+			unsigned long long tlast = 0;
 			while (m_want_run.load() && !m_quit.load())
+			{
+				const auto t0 = std::chrono::steady_clock::now();
 				m_dev.tcvr_run(2048);
+				m_run_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+				if (m_run_ns - tlast > 5000000000ull)   // un compte rendu toutes les ~5 s de fil actif
+				{
+					tlast = m_run_ns;
+					tcvr_tgp_report(m_run_ns, m_wait_ns);
+				}
+			}
 		}
 	}
 
@@ -443,6 +461,7 @@ private:
 	std::atomic<bool> m_want_run{ false }, m_quit{ false }, m_sleeping{ false };
 	bool m_parked = true;
 	int m_spin_us = 150;
+	unsigned long long m_run_ns = 0, m_wait_ns = 0;   // fil TGP seul
 public:
 	std::atomic<unsigned long long> m_n_in_sleep{0}, m_n_in_empty{0}, m_n_out_fail{0}, m_n_out_wait{0}, m_n_in_words{0}, m_n_out_words{0};
 private:
