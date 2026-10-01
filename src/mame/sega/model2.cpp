@@ -496,6 +496,8 @@ void model2_tgp_state::machine_start()
 	model2_state::machine_start();
 
 	m_copro_tgp->tcvr_set_ram(m_copro_tgp_ram_lo, m_copro_tgp_ram_hi);
+	if (m_scsp && tcvr_prop_flag("debug.tcvr.scsp.fast", true))
+		m_scsp->tcvr_set_ram(&m_soundram[0], 0x40000);   // debug.tcvr.scsp.fast=0 : lecture par l'espace d'adresses (A/B de l'exactitude)
 	m_copro_tgp->tcvr_set_prog(m_copro_tgp_program, 0x1000);
 
 #if defined(__ANDROID__)
