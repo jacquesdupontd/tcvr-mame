@@ -1741,12 +1741,20 @@ struct tcvr_m2_scene_store
 		tcvr_m2_frame frame{};
 	};
 	std::mutex mutex;
-	slot slots[3];
-	int write_idx = 0, published_idx = 1, read_idx = 2;
+	// FILE D'ATTENTE de scenes (au lieu d'un triple tampon qui ne garde que la derniere) : quand l'emulation prend plus de 16,7 ms sur une
+	// image puis rattrape en enchainant les suivantes, le consommateur (une lecture par synchronisation verticale) jetait des scenes et
+	// l'image saccadait (mesure : 60,0 scenes publiees/s mais 40-57 vues). Les scenes sont ici rendues dans l'ordre, une par lecture ;
+	// au-dela de kMaxQueue en attente, la plus ancienne est abandonnee (pour garder la latence bornee).
+	static constexpr int kSlots = 6, kMaxQueue = 3;
+	slot slots[kSlots];
+	int write_idx = 0, read_idx = 1;          // creneau en cours d'ecriture ; creneau tenu par le lecteur
+	int queue[kSlots] = {}; int queue_len = 0; // indices publies, du plus ancien au plus recent
+	bool in_use[kSlots] = { true, true, false, false, false, false };   // reserve : ecriture, lecture, file
 	bool fresh = false;
 	bool recording = false;
 	uint64_t sequence = 0;
 	uint32_t dropped_prims = 0, dropped_vertices = 0;
+	int take_free_slot() { for (int i = 0; i < kSlots; i++) if (!in_use[i]) { in_use[i] = true; return i; } return -1; }
 	// Pre-clip stream: the geometry engine runs during the frame, the recorder
 	// (begin/end) only at render time, so raw polygons are gathered whenever the
 	// scene is enabled, reset when the board starts a display list, and the
@@ -1773,6 +1781,8 @@ extern "C" void tcvr_m2_scene_invalidate()
 	std::lock_guard lock(s_m2_scene.mutex);
 	s_m2_scene.invalid = true;
 	s_m2_scene.fresh = false;
+	for (int i = 0; i < tcvr_m2_scene_store::kSlots; i++) s_m2_scene.in_use[i] = (i == s_m2_scene.read_idx);
+	s_m2_scene.queue_len = 0; s_m2_scene.write_idx = -1;
 	s_m2_scene.recording = false;
 	s_m2_scene.raw_pending_vertices.clear(); s_m2_scene.raw_pending_prims.clear();
 	s_m2_scene.raw_last_vertices.clear(); s_m2_scene.raw_last_prims.clear();
@@ -1802,6 +1812,18 @@ extern "C" void tcvr_m2_scene_raw_off(int off) { s_m2_raw_off.store(off, std::me
 extern "C" void tcvr_m2_scene_begin(int width, int height)
 {
 	if (!s_m2_scene.enabled.load(std::memory_order_relaxed)) { s_m2_scene.recording = false; return; }
+	{   // creneau d'ecriture : le courant s'il n'a pas ete publie, sinon un creneau libre
+		std::lock_guard lock(s_m2_scene.mutex);
+		if (s_m2_scene.write_idx < 0) {
+			int f = s_m2_scene.take_free_slot();
+			if (f < 0) {   // plus de creneau libre (lecteur lent) : on reprend le plus ancien de la file
+				f = s_m2_scene.queue[0];
+				for (int i = 1; i < s_m2_scene.queue_len; i++) s_m2_scene.queue[i - 1] = s_m2_scene.queue[i];
+				s_m2_scene.queue_len--;
+			}
+			s_m2_scene.write_idx = f;
+		}
+	}
 	auto &w = s_m2_scene.slots[s_m2_scene.write_idx];
 	w.vertices.clear();
 	w.prims.clear();
@@ -2019,7 +2041,14 @@ extern "C" void tcvr_m2_scene_end(const tcvr_m2_frame *fp)
 	std::lock_guard lock(s_m2_scene.mutex);
 	s_m2_scene.invalid = false;
 	w.frame.sequence = ++s_m2_scene.sequence;
-	std::swap(s_m2_scene.write_idx, s_m2_scene.published_idx);
+	// la scene rejoint la file ; trop de scenes en attente : la plus ancienne est abandonnee
+	s_m2_scene.queue[s_m2_scene.queue_len++] = s_m2_scene.write_idx;
+	s_m2_scene.write_idx = -1;
+	while (s_m2_scene.queue_len > tcvr_m2_scene_store::kMaxQueue) {
+		s_m2_scene.in_use[s_m2_scene.queue[0]] = false;
+		for (int i = 1; i < s_m2_scene.queue_len; i++) s_m2_scene.queue[i - 1] = s_m2_scene.queue[i];
+		s_m2_scene.queue_len--;
+	}
 	s_m2_scene.fresh = true;
 	{   // cote producteur : combien de scenes l'emulation publie par seconde (le journal d'affichage ne voit que ce que la boucle consomme)
 		static auto t0 = std::chrono::steady_clock::now(); static unsigned n = 0, unch = 0, maxgap = 0; static auto tlast = t0;
@@ -2038,7 +2067,20 @@ extern "C" const tcvr_m2_frame *tcvr_m2_acquire_scene(void)
 {
 	std::lock_guard lock(s_m2_scene.mutex);
 	if (s_m2_scene.invalid) return nullptr;
-	if (s_m2_scene.fresh) { std::swap(s_m2_scene.read_idx, s_m2_scene.published_idx); s_m2_scene.fresh = false; }
+	if (s_m2_scene.queue_len > 0) {   // une scene par lecture, dans l'ordre ; le creneau precedent redevient libre
+		s_m2_scene.in_use[s_m2_scene.read_idx] = false;
+		s_m2_scene.read_idx = s_m2_scene.queue[0];
+		for (int i = 1; i < s_m2_scene.queue_len; i++) s_m2_scene.queue[i - 1] = s_m2_scene.queue[i];
+		s_m2_scene.queue_len--;
+		// retard accumule (2 scenes ou plus encore en attente) : on saute la plus ancienne, pour ne pas ajouter de latence
+		if (s_m2_scene.queue_len >= 2) {
+			s_m2_scene.in_use[s_m2_scene.read_idx] = false;
+			s_m2_scene.read_idx = s_m2_scene.queue[0];
+			for (int i = 1; i < s_m2_scene.queue_len; i++) s_m2_scene.queue[i - 1] = s_m2_scene.queue[i];
+			s_m2_scene.queue_len--;
+		}
+	}
+	s_m2_scene.fresh = false;
 	auto &r = s_m2_scene.slots[s_m2_scene.read_idx];
 	return r.frame.sequence ? &r.frame : nullptr;
 }
