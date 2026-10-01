@@ -10,6 +10,9 @@
 
 #pragma once
 
+#include <atomic>
+#include <vector>
+
 #include "tilemap.h"
 
 
@@ -34,6 +37,12 @@ public:
 	uint16_t char_r(offs_t offset);
 	void char_w(offs_t offset, uint16_t data, uint16_t mem_mask = ~0);
 	void xhout_w(uint16_t data);
+
+	// TCVR : dessin des tuiles par un fil a part. Tant qu'un dessin est en cours, les ecritures du jeu dans la RAM des tuiles et
+	// des caracteres sont mises de cote (et relues par-dessus pour le jeu), puis rejouees par tcvr_flush() : le dessin voit
+	// exactement l'etat du vblank, et le jeu ne voit rien de different.
+	void tcvr_set_busy(bool b) { m_tcvr_busy.store(b, std::memory_order_release); }
+	void tcvr_flush();
 	void xvout_w(uint16_t data);
 
 	void draw(screen_device &screen, bitmap_ind16 &bitmap, const rectangle &cliprect, int layer, int pri, int flags);
@@ -71,6 +80,13 @@ private:
 
 	template<class BitmapClass>
 	void draw_common(screen_device &screen, BitmapClass &bitmap, const rectangle &cliprect, int layer, int pri, int flags);
+
+	struct tcvr_pending { uint32_t offset; uint16_t data, mask; bool is_char; };
+	std::vector<tcvr_pending> m_tcvr_pending;
+	std::atomic<bool> m_tcvr_busy{false};
+	uint16_t tcvr_overlay(bool is_char, offs_t offset) const;
+	bool tile_apply(offs_t offset, uint16_t data, uint16_t mem_mask);
+	bool char_apply(offs_t offset, uint16_t data, uint16_t mem_mask);
 
 	devcb_write16 m_xhout_write_cb;
 	devcb_write16 m_xvout_write_cb;
