@@ -855,7 +855,18 @@ extern "C" int tcvr_mame_boot_smoke(const char *driver_id, const char *rom_path,
 		options.set_value(OPTION_SKIP_GAMEINFO, 1, OPTION_PRIORITY_MAXIMUM);
 		options.set_value(OPTION_READCONFIG, 0, OPTION_PRIORITY_MAXIMUM);
 		options.set_value(OPTION_WRITECONFIG, 0, OPTION_PRIORITY_MAXIMUM);
+#if defined(__SWITCH__)
+		// Switch : le jeu garde ses reglages de borne, ses scores et ses pieces d'une session a l'autre, sur la carte SD.
+		// debug.tcvr.nvram=0 pour repartir d'une borne neuve.
+		{
+			const bool keep = property_flag("debug.tcvr.nvram", true);
+			options.set_value(OPTION_NVRAM_SAVE, keep ? 1 : 0, OPTION_PRIORITY_MAXIMUM);
+			options.set_value(OPTION_NVRAM_DIRECTORY, "/switch/segarally/nvram", OPTION_PRIORITY_MAXIMUM);
+			options.set_value(OPTION_CFG_DIRECTORY, "/switch/segarally/cfg", OPTION_PRIORITY_MAXIMUM);
+		}
+#else
 		options.set_value(OPTION_NVRAM_SAVE, 0, OPTION_PRIORITY_MAXIMUM);
+#endif
 		// debug.tcvr.mame.nodrc=1: interpreters instead of the ARM64 recompilers (to tell a recompiler bug apart)
 		if (property_flag("debug.tcvr.mame.nodrc", false))
 			options.set_value(OPTION_DRC, 0, OPTION_PRIORITY_MAXIMUM);
