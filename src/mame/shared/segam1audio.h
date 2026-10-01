@@ -59,6 +59,7 @@ private:
 	devcb_write_line   m_rxd_handler;
 
 	void output_txd(int state);
+	void tcvr_uart_pulse_w(int state);
 };
 
 

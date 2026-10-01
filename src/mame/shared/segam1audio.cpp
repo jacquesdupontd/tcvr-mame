@@ -14,6 +14,32 @@
 #include "machine/clock.h"
 #include "speaker.h"
 
+#if defined(__ANDROID__)
+#include <sys/system_properties.h>
+#endif
+
+namespace {
+
+// TCVR (01/10, Daytona USA): the edge-pulse UART clock of the Model 2 main board (model2.cpp, 23/09), on the
+// sound board's end of the same link. MAME's 500 kHz clock toggles a timer a million times a second, each one a
+// scheduler slice in which every CPU of the machine is re-entered (Daytona: 1.52M clock events a second, 190 ms of
+// callbacks, each CPU entered ~1M times). The i8251 only acts on edges (receive on rising, transmit on falling): a
+// 250 kHz clock whose every toggle delivers one full pulse gives it the same pulses per second with half the
+// events (transmit 1 us earlier inside a 32 us bit). debug.tcvr.m2.uartPulse=0 restores MAME's clock.
+bool tcvr_uart_pulse_on()
+{
+#if defined(__ANDROID__)
+	char value[PROP_VALUE_MAX] = {};
+	// "" (the bench's way to release a property) counts as unset
+	if (__system_property_get("debug.tcvr.m2.uartPulse", value) <= 0 || !value[0] || value[0] == '"') return true;
+	return value[0] == '1';
+#else
+	return false;
+#endif
+}
+
+} // anonymous namespace
+
 void segam1audio_device::segam1audio_map(address_map &map)
 {
 	map(0x000000, 0x03ffff).rom();
@@ -75,9 +101,17 @@ void segam1audio_device::device_add_mconfig(machine_config &config)
 	m_uart->rxrdy_handler().set_inputline(m_audiocpu, M68K_IRQ_2);
 	m_uart->txd_handler().set(FUNC(segam1audio_device::output_txd));
 
-	clock_device &uart_clock(CLOCK(config, "uart_clock", 16_MHz_XTAL / 2 / 16)); // 16 times 31.25kHz (standard Sega/MIDI sound data rate)
-	uart_clock.signal_handler().set(m_uart, FUNC(i8251_device::write_txc));
-	uart_clock.signal_handler().append(m_uart, FUNC(i8251_device::write_rxc));
+	if (tcvr_uart_pulse_on())
+	{
+		clock_device &uart_clock(CLOCK(config, "uart_clock", 16_MHz_XTAL / 2 / 32));
+		uart_clock.signal_handler().set(FUNC(segam1audio_device::tcvr_uart_pulse_w));
+	}
+	else
+	{
+		clock_device &uart_clock(CLOCK(config, "uart_clock", 16_MHz_XTAL / 2 / 16)); // 16 times 31.25kHz (standard Sega/MIDI sound data rate)
+		uart_clock.signal_handler().set(m_uart, FUNC(i8251_device::write_txc));
+		uart_clock.signal_handler().append(m_uart, FUNC(i8251_device::write_rxc));
+	}
 
 	// DAC output clocks measures:
 	// BYTECLK = 10/8 (1.25MHz)
@@ -139,6 +173,14 @@ void segam1audio_device::m1_snd_mpcm_bnk2_w(uint16_t data)
 void segam1audio_device::write_txd(int state)
 {
 	m_uart->write_rxd(state);
+}
+
+void segam1audio_device::tcvr_uart_pulse_w(int state)
+{
+	m_uart->write_txc(1);
+	m_uart->write_rxc(1);   // rising: receive
+	m_uart->write_txc(0);   // falling: transmit
+	m_uart->write_rxc(0);
 }
 
 void segam1audio_device::output_txd(int state)
