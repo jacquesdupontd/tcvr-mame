@@ -2021,6 +2021,17 @@ extern "C" void tcvr_m2_scene_end(const tcvr_m2_frame *fp)
 	w.frame.sequence = ++s_m2_scene.sequence;
 	std::swap(s_m2_scene.write_idx, s_m2_scene.published_idx);
 	s_m2_scene.fresh = true;
+	{   // cote producteur : combien de scenes l'emulation publie par seconde (le journal d'affichage ne voit que ce que la boucle consomme)
+		static auto t0 = std::chrono::steady_clock::now(); static unsigned n = 0, unch = 0, maxgap = 0; static auto tlast = t0;
+		++n; if (w.frame.geometry_unchanged) ++unch;
+		const auto now = std::chrono::steady_clock::now();
+		const unsigned gap = unsigned(std::chrono::duration_cast<std::chrono::milliseconds>(now - tlast).count()); tlast = now; if (gap > maxgap) maxgap = gap;
+		if (now - t0 >= std::chrono::seconds(2))
+		{
+			__android_log_print(ANDROID_LOG_INFO, "TCVR_PUB", "PUBLICATION %.1f scenes/s (dont geometrie inchangee %u), plus long intervalle %u ms", n / std::chrono::duration<double>(now - t0).count(), unch, maxgap);
+			t0 = now; n = unch = maxgap = 0;
+		}
+	}
 }
 
 extern "C" const tcvr_m2_frame *tcvr_m2_acquire_scene(void)
