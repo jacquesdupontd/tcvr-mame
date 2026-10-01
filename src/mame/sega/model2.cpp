@@ -2881,6 +2881,19 @@ void model2a_state::model2a(machine_config &config)
 	model2_timers(config);
 	model2_screen(config);
 	model2_scsp(config);
+	// TCVR (01/10): Model 2A keeps MAME's 500 kHz UART clock -- Sega Rally, the reference, was validated with it. Only
+	// when the bench (debug.tcvr.m2.uartN) or the app asks (profiles::UartPulsesFor: a game with no tuning history, or
+	// an m2.uartPulses line in a game's profile), the edge-pulse clock of 2B/2C with N pulses per event.
+	{
+		int const n = tcvr_uart_pulses(0);   // 0: nobody asked
+		if (n == 1 || n == 2 || n == 4)
+		{
+			g_tcvr_uart_n = n;
+			config.device_remove("uart_clock");
+			clock_device &uart_clock(CLOCK(config, "uart_clock", 250000 / n));
+			uart_clock.signal_handler().set(FUNC(model2a_state::tcvr_uart_pulsen_w));
+		}
+	}
 
 	M2COMM(config, "m2comm");
 
