@@ -115,6 +115,14 @@ private:
 	} m_udata;
 
 	SCSP_SLOT m_Slots[32];
+public:
+	// TCVR : RAM son lue directement (pas d'appel virtuel de l'espace d'adresses par echantillon et par voix). `words` en mots de 16 bits.
+	void tcvr_set_ram(const u16 *ram, u32 words) { m_tcvr_ram = ram; m_tcvr_words = words; }
+private:
+	const u16 *m_tcvr_ram = nullptr;
+	u32 m_tcvr_words = 0;
+	inline u16 fast_word(offs_t addr) { const u32 i = addr >> 1; return (m_tcvr_ram && i < m_tcvr_words) ? m_tcvr_ram[i] : read_word(addr); }
+	inline u8 fast_byte(offs_t addr) { const u32 i = addr >> 1; if(m_tcvr_ram && i < m_tcvr_words) { const u16 w = m_tcvr_ram[i]; return (addr & 1) ? u8(w) : u8(w >> 8); } return read_byte(addr); }
 	s16 m_RINGBUF[128];
 	u8 m_BUFPTR;
 #if SCSP_FM_DELAY

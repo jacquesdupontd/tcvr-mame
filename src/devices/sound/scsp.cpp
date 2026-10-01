@@ -1174,8 +1174,8 @@ inline s32 scsp_device::UpdateSlot(SCSP_SLOT *slot)
 	{
 		if (PCM8B(slot)) //8 bit signed
 		{
-			int8_t p1 = read_byte(SA(slot) + addr1);
-			int8_t p2 = read_byte(SA(slot) + addr2);
+			int8_t p1 = fast_byte(SA(slot) + addr1);
+			int8_t p2 = fast_byte(SA(slot) + addr2);
 			s32 s;
 			s32 fpart=slot->cur_addr & ((1 << SHIFT) - 1);
 			s = (int) (p1 << 8) * ((1 << SHIFT) - fpart) + (int) (p2 << 8) * fpart;
@@ -1183,8 +1183,8 @@ inline s32 scsp_device::UpdateSlot(SCSP_SLOT *slot)
 		}
 		else    //16 bit signed (endianness?)
 		{
-			s16 p1 = read_word(SA(slot) + addr1);
-			s16 p2 = read_word(SA(slot) + addr2);
+			s16 p1 = fast_word(SA(slot) + addr1);
+			s16 p2 = fast_word(SA(slot) + addr2);
 			s32 s;
 			s32 fpart = slot->cur_addr & ((1 << SHIFT) - 1);
 			s = (int)(p1) * ((1 << SHIFT) - fpart) + (int)(p2) * fpart;
