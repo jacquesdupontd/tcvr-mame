@@ -30,6 +30,18 @@ extern "C" void tcvr_mame_scene_reset();
 #include <sstream>
 #include <vector>
 
+// debug.tcvr.replaypath : autre emplacement du fichier d'enregistrement des entrees (banc natif) ; defaut : la SD de la Switch
+static const char *tcvr_replay_path()
+{
+	static char path[256] = {};
+	if (!path[0]) {
+		char v[PROP_VALUE_MAX] = {};
+		if (__system_property_get("debug.tcvr.replaypath", v) > 0 && v[0]) std::snprintf(path, sizeof path, "%s", v);
+		else std::snprintf(path, sizeof path, "/switch/segarally/replay.bin");
+	}
+	return path;
+}
+
 namespace {
 
 constexpr char kLogTag[] = "TCVR_MAME";
@@ -574,14 +586,14 @@ private:
 					{
 						frames.push_back({ steer, gas, brake, cur });
 						if ((frames.size() % 300) == 0)   // flushed regularly: the run may end abruptly
-							if (FILE *f = std::fopen("/switch/segarally/replay.bin", "wb")) { std::fwrite(frames.data(), sizeof(rec), frames.size(), f); std::fclose(f); }
+							if (FILE *f = std::fopen(tcvr_replay_path(), "wb")) { std::fwrite(frames.data(), sizeof(rec), frames.size(), f); std::fclose(f); }
 					}
 					if (replaying)
 					{
 						if (!loaded)
 						{
 							loaded = true;
-							if (FILE *f = std::fopen("/switch/segarally/replay.bin", "rb"))
+							if (FILE *f = std::fopen(tcvr_replay_path(), "rb"))
 							{
 								rec r;
 								while (std::fread(&r, sizeof r, 1, f) == 1) frames.push_back(r);
