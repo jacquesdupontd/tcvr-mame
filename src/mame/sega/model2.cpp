@@ -2793,6 +2793,29 @@ void model2_state::sj25_0207_01(machine_config &config)
 	MSM6253(config, "driveadc");
 }
 
+// Daytona USA's far cars (01/10/2026 night, Guillaume: "les voitures de loin n'ont aucune forme, juste un rectangle sans vrai
+// polygones de formes", "c'est juste la distance qui empêche de charger ces polygones, dès qu'elles se rapprochent c'est ok").
+// Each car body has four models in the data ROM's model table (main_data 0x8488e0..: 164, 119, 103 and 16 polygons). Every
+// frame the routine at 0x82C4 gives each car the level it asks for (byte 0xD0 of the car, from its distance) within a quota
+// of cars per detailed level (bytes 0x503202..0x503204), one level down when a quota is spent; level 1 has no quota and
+// draws the 16-polygon box -- the model pointer at +0x74 of the car, loaded at 0x83D4. Beyond about 100 m every car was
+// that box, sized for 5-10 pixels of the cabinet's screen; the headset shows it 4-8 times larger. Level 1 now loads the
+// 103-polygon body (+0x78). Measured on the PC MAME (attract, 50 s): no box left, level-2 bodies out to 256 m, polygons
+// per frame +8 % (median 1218 -> 1317), +17 % at the 95th percentile. debug.tcvr.daytona.farCars=0 keeps the boxes (bench).
+void model2o_state::init_daytona()
+{
+#if defined(__ANDROID__)
+	if (!tcvr_prop_flag("debug.tcvr.daytona.farCars", true)) return;
+#endif
+	u32 *rom = reinterpret_cast<u32 *>(memregion("maincpu")->base());
+	const bool found = rom[0x83d4 / 4] == 0x901e2074;   // ld 0x74(g8),r3
+	if (found)
+		rom[0x83d4 / 4] = 0x901e2078;                    // ld 0x78(g8),r3
+#if defined(__ANDROID__)
+	__android_log_print(ANDROID_LOG_INFO, "TCVR_DAYTONA", "far cars: %s", found ? "103-polygon bodies instead of the 16-polygon boxes" : "instruction not found, cabinet boxes kept");
+#endif
+}
+
 void model2o_state::daytona(machine_config &config)
 {
 	model2o(config);
@@ -7844,7 +7867,7 @@ void model2_state::init_doa()
 }
 
 // Model 2 (TGPs, Model 1 sound board)
-GAME( 1994, daytona,    0,        daytona,      daytona,   model2o_state,      empty_init, ROT0, "Sega", "Daytona USA (Revision A)", 0 )
+GAME( 1994, daytona,    0,        daytona,      daytona,   model2o_state,      init_daytona, ROT0, "Sega", "Daytona USA (Revision A)", 0 )
 GAME( 1994, daytonase,  daytona,  daytona,      daytona,   model2o_state,      empty_init, ROT0, "Sega", "Daytona USA Special Edition (Revision A)", 0 )
 GAME( 1993, daytona93,  daytona,  daytona,      daytona,   model2o_state,      empty_init, ROT0, "Sega", "Daytona USA", 0 )
 GAME( 1994, daytonas,   daytona,  daytona,      daytona,   model2o_state,      empty_init, ROT0, "Sega", "Daytona USA (with Saturn advertisements)", 0 )

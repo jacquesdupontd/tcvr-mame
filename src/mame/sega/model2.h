@@ -437,6 +437,8 @@ public:
 	void desert(machine_config &config) ATTR_COLD;
 	void vcop(machine_config &config) ATTR_COLD;
 
+	void init_daytona() ATTR_COLD;   // TCVR: the far cars' 16-polygon boxes replaced by the 103-polygon bodies (model2.cpp)
+
 protected:
 	void daytona_output_w(u8 data);
 	void desert_output_w(u8 data);
