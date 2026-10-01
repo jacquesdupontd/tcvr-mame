@@ -285,7 +285,12 @@ void model2_state::machine_start()
 class model2_state::tcvr_tgp_thread
 {
 public:
-	explicit tcvr_tgp_thread(mb86234_device &dev) : m_dev(dev) { m_thread = std::thread([this] { loop(); }); }
+	explicit tcvr_tgp_thread(mb86234_device &dev) : m_dev(dev)
+	{
+		char v[PROP_VALUE_MAX] = {};
+		if (__system_property_get("debug.tcvr.m2.tgpspin", v) > 0 && v[0]) m_spin_us = atoi(v);
+		m_thread = std::thread([this] { loop(); });
+	}
 	~tcvr_tgp_thread()
 	{
 		{ std::lock_guard<std::mutex> l(m_mtx); m_quit = true; m_want_run = false; }
@@ -311,11 +316,15 @@ public:
 	bool pop_out(u32 &v)
 	{
 		u32 t = m_out_t.load(std::memory_order_relaxed);
-		for (int spin = 0; m_out_h.load(std::memory_order_acquire) == t; ++spin)
+		if (m_out_h.load(std::memory_order_acquire) == t)
 		{
-			if (spin == 0) ++m_n_out_wait;
-			if (spin > 200) { ++m_n_out_fail; return false; }
-			std::this_thread::yield();
+			++m_n_out_wait;
+			const auto t0 = std::chrono::steady_clock::now();
+			for (int i = 0; m_out_h.load(std::memory_order_acquire) == t; ++i)
+			{
+				cpu_relax();
+				if ((i & 31) == 31 && std::chrono::steady_clock::now() - t0 > std::chrono::microseconds(m_spin_us)) { ++m_n_out_fail; return false; }
+			}
 		}
 		v = m_out[t & (N - 1)];
 		m_out_t.store(t + 1, std::memory_order_release);
@@ -383,14 +392,23 @@ private:
 			m_cv.notify_all();
 		}
 	}
+	static inline void cpu_relax()
+	{
+#if defined(__aarch64__)
+		asm volatile("yield");
+#elif defined(__x86_64__)
+		__builtin_ia32_pause();
+#endif
+	}
 	void wait_in(u32 t)
 	{
-		for (int i = 0; i < 400; ++i)
+		// attente active d'abord (m_spin_us) : un reveil de fil coute des dizaines de microsecondes et l'i960 attend souvent la reponse
+		const auto t0 = std::chrono::steady_clock::now();
+		for (int i = 0;; ++i)
 		{
 			if (m_in_h.load(std::memory_order_acquire) != t || !m_want_run.load(std::memory_order_relaxed)) return;
-#if defined(__aarch64__)
-			asm volatile("yield");
-#endif
+			cpu_relax();
+			if ((i & 31) == 31 && std::chrono::steady_clock::now() - t0 > std::chrono::microseconds(m_spin_us)) break;
 		}
 		std::unique_lock<std::mutex> l(m_mtx);
 		m_sleeping = true; ++m_n_in_sleep;
@@ -421,6 +439,7 @@ private:
 	std::condition_variable m_cv, m_cv_state;
 	std::atomic<bool> m_want_run{ false }, m_quit{ false }, m_sleeping{ false };
 	bool m_parked = true;
+	int m_spin_us = 150;
 public:
 	std::atomic<unsigned long long> m_n_in_sleep{0}, m_n_in_empty{0}, m_n_out_fail{0}, m_n_out_wait{0}, m_n_in_words{0}, m_n_out_words{0};
 private:
