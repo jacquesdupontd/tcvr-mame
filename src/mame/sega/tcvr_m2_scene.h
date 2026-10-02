@@ -91,6 +91,11 @@ struct tcvr_m2_prim
 	// Smooth motion (25/09): the polygon's object (polygon data address), its rank in the object, and which copy of
 	// that object it is in the frame. Model 1 carries its own ids in the raw vertices' u/v instead.
 	uint32_t motion_addr, motion_poly, motion_serial;
+	// HD texture packs (02/10/2026): texture header words 0 and 2 as the board has them -- the texture's identity in
+	// packs written for ElSemi's Model 2 Emulator (ID1 = th2 << 16 | th0 & ~0x4C0). Bit 11 of th2 is decoded nowhere
+	// above, so the fields cannot be rebuilt from the decoded ones. 0 on Model 1. texpack_format belongs to the
+	// CONSUMER: MAME leaves it 0, the renderer writes there the colour format of the replacement image it draws.
+	uint32_t texheader0, texheader2, texpack_format;
 };
 
 struct tcvr_m2_frame

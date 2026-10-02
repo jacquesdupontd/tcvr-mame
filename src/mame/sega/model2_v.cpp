@@ -557,6 +557,7 @@ void model2_state::model2_3d_process_polygon(raster_state *raster, u32 attr)
 			tp.utexx = ((object.texheader[2] >> 13) & 1) * 128;
 			tp.utexy = ((object.texheader[2] >> 14) & 3) * 128;
 		}
+		tp.texheader0 = object.texheader[0]; tp.texheader2 = object.texheader[2];   // HD texture packs (02/10)
 		tp.center_x = raster->center[raster->center_sel][0];
 		tp.center_y = raster->center[raster->center_sel][1];
 		tp.zsort = float_to_zval(zvalue, raster->z_adjust);
@@ -769,6 +770,7 @@ void model2_renderer::model2_3d_render(polygon *poly, const rectangle &cliprect)
 		tp.texmirrorx = extra.texmirrorx; tp.texmirrory = extra.texmirrory;
 		tp.utex = extra.utex; tp.utexminlod = extra.utexminlod;
 		tp.utexx = extra.utexx; tp.utexy = extra.utexy;
+		tp.texheader0 = poly->texheader[0]; tp.texheader2 = poly->texheader[2];   // HD texture packs (02/10)
 		tp.center_x = poly->center[0];
 		tp.center_y = poly->center[1];
 		tp.window = poly->window;
