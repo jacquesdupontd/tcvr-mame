@@ -68,6 +68,7 @@ public:
 	void tcvr_set_prog(u32 *p, u32 words) { m_prog = p; m_prog_words = words; }
 	void tcvr_reset_state() { device_reset(); }
 	void tcvr_run(int cycles) { m_icount = cycles; execute_run(); }
+	int tcvr_icount() const { return m_icount; }   // cycles restants dans la tranche en cours (horloge emulee du fil TGP)
 
 	void gpio0_w(int state);
 	void gpio1_w(int state);

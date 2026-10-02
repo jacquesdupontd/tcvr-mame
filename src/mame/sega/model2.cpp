@@ -297,6 +297,7 @@ public:
 	{
 		char v[PROP_VALUE_MAX] = {};
 		if (__system_property_get("debug.tcvr.m2.tgpspin", v) > 0 && v[0]) m_spin_us = atoi(v);
+		m_nsPerCycle = 3.0e9 / double(dev.clock());   // un cycle du TGP = 3 horloges
 		m_thread = std::thread([this] { loop(); });
 	}
 	~tcvr_tgp_thread()
@@ -304,11 +305,13 @@ public:
 		{ std::lock_guard<std::mutex> l(m_mtx); m_quit = true; m_want_run = false; }
 		m_cv.notify_all();
 		if (m_thread.joinable()) m_thread.join();
-		fprintf(stderr, "TGPTHREAD in=%llu out=%llu in_empty=%llu in_sleep=%llu out_wait=%llu out_fail=%llu\n", (unsigned long long)m_n_in_words, (unsigned long long)m_n_out_words, (unsigned long long)m_n_in_empty, (unsigned long long)m_n_in_sleep, (unsigned long long)m_n_out_wait, (unsigned long long)m_n_out_fail);
 	}
 
+	// Horloge EMULEE (ns). Chaque mot qui traverse une FIFO porte l'heure emulee de son emetteur ; le TGP avance sa propre horloge de ses
+	// cycles reellement executes (et saute a l'heure d'un mot qui arrive apres lui) ; l'i960 ne voit un mot du TGP que lorsque SON horloge a atteint
+	// celle du mot. Le temps de jeu est ainsi celui de la borne (sans cela la voiture allait a 144 km/h au lieu de 210 au meme instant du rejeu).
 	// ---- cote i960 ----
-	void push_in(u32 v)
+	void push_in(u32 v, u64 ns)
 	{
 		const u32 h = m_in_h.load(std::memory_order_relaxed);
 		while (h - m_in_t.load(std::memory_order_acquire) >= N)
@@ -316,29 +319,31 @@ public:
 			if (!m_want_run.load()) return;          // TGP arrete : plus personne ne vide, on perd (jamais vu en pratique)
 			std::this_thread::yield();
 		}
-		m_in[h & (N - 1)] = v;
+		m_in[h & (N - 1)] = { v, ns };
 		m_in_h.store(h + 1, std::memory_order_release);
 		++m_n_in_words;
 		wake_tgp();
 	}
-	bool pop_out(u32 &v)
+	// vrai : un mot est lisible a l'heure now ; faux : rien de lisible a cette heure (determine, jamais « pas encore calcule »)
+	bool out_ready(u64 now)
 	{
-		u32 t = m_out_t.load(std::memory_order_relaxed);
-		if (m_out_h.load(std::memory_order_acquire) == t)
+		for (int spins = 0;; ++spins)
 		{
-			++m_n_out_wait;
-			const auto t0 = std::chrono::steady_clock::now();
-			for (int i = 0; m_out_h.load(std::memory_order_acquire) == t; ++i)
-			{
-				cpu_relax();
-				if ((i & 31) == 31 && std::chrono::steady_clock::now() - t0 > std::chrono::microseconds(m_spin_us)) { ++m_n_out_fail; return false; }
-			}
+			const int r = check_out(now);
+			if (r >= 0) return r == 1;
+			if (spins < 200) cpu_relax();
+			else if (spins < 4000) std::this_thread::yield();
+			else std::this_thread::sleep_for(std::chrono::microseconds(50));
 		}
-		v = m_out[t & (N - 1)];
+	}
+	bool pop_out(u64 now, u32 &v)
+	{
+		if (!out_ready(now)) return false;
+		const u32 t = m_out_t.load(std::memory_order_relaxed);
+		v = m_out[t & (N - 1)].v;
 		m_out_t.store(t + 1, std::memory_order_release);
 		return true;
 	}
-	bool out_empty() const { return m_out_h.load(std::memory_order_acquire) == m_out_t.load(std::memory_order_acquire); }
 
 	void halt()
 	{
@@ -366,12 +371,16 @@ public:
 		if (m_in_h.load(std::memory_order_acquire) == t)
 		{
 			++m_n_in_empty;
+			m_idle.store(true, std::memory_order_seq_cst);
 			wait_in(t);
 			if (m_in_h.load(std::memory_order_acquire) == t) { m_dev.stall(); return 0; }
 		}
-		const u32 v = m_in[t & (N - 1)];
+		m_idle.store(false, std::memory_order_seq_cst);
+		const Word w = m_in[t & (N - 1)];
 		m_in_t.store(t + 1, std::memory_order_release);
-		return v;
+		const u64 cur = now_ns();
+		if (w.ns > cur) m_clkBase += w.ns - cur;   // le mot arrive apres l'horloge du TGP : il attendait, son horloge saute
+		return w.v;
 	}
 	void out_write(u32 v)
 	{
@@ -383,13 +392,36 @@ public:
 				std::this_thread::yield();
 			if (h - m_out_t.load(std::memory_order_acquire) >= N) { m_dev.stall(); return; }
 		}
-		m_out[h & (N - 1)] = v;
+		const u64 stamp = now_ns();
+		m_out[h & (N - 1)] = { v, stamp };
 		m_out_h.store(h + 1, std::memory_order_release);
+		m_pubClk.store(stamp, std::memory_order_release);
 		++m_n_out_words;
 	}
 
 private:
+	struct Word { u32 v; u64 ns; };
 	static constexpr u32 N = 1u << 16;
+	static constexpr int kChunk = 512;   // cycles du TGP par tranche (30 us emules) : l'horloge est publiee a chaque tranche
+
+	u64 now_ns() const { return m_clkBase + u64(double(kChunk - m_dev.tcvr_icount()) * m_nsPerCycle); }
+
+	// 1 : un mot est lisible a l'heure now ; 0 : aucun (determine) ; -1 : pas encore determine (le TGP n'a pas assez avance, ou calcule)
+	int check_out(u64 now)
+	{
+		const u32 t = m_out_t.load(std::memory_order_relaxed);
+		const u32 h = m_out_h.load(std::memory_order_acquire);
+		if (h != t) return (m_out[t & (N - 1)].ns <= now) ? 1 : 0;
+		// aucune sortie : le TGP peut-il encore en produire une datee avant now ?
+		const bool idle = m_idle.load(std::memory_order_seq_cst) && m_in_h.load(std::memory_order_acquire) == m_in_t.load(std::memory_order_acquire);
+		if (idle || m_parked_flag.load(std::memory_order_acquire) || !m_want_run.load(std::memory_order_acquire))
+		{
+			if (m_out_h.load(std::memory_order_acquire) != h) return check_out(now);   // une sortie est arrivee entre-temps
+			return 0;
+		}
+		if (m_pubClk.load(std::memory_order_acquire) >= now) { if (m_out_h.load(std::memory_order_acquire) != h) return check_out(now); return 0; }
+		return -1;
+	}
 
 	void wake_tgp()
 	{
@@ -434,17 +466,19 @@ private:
 		{
 			{
 				std::unique_lock<std::mutex> l(m_mtx);
-				m_parked = true;
+				m_parked = true; m_parked_flag.store(true, std::memory_order_release);
 				m_cv_state.notify_all();
 				m_cv.wait(l, [this] { return m_want_run.load() || m_quit.load(); });
 				if (m_quit) return;
-				m_parked = false;
+				m_parked = false; m_parked_flag.store(false, std::memory_order_release);
 			}
 			unsigned long long tlast = 0;
 			while (m_want_run.load() && !m_quit.load())
 			{
 				const auto t0 = std::chrono::steady_clock::now();
-				m_dev.tcvr_run(2048);
+				m_dev.tcvr_run(kChunk);
+				m_clkBase += u64(double(kChunk - m_dev.tcvr_icount()) * m_nsPerCycle);   // cycles reellement consommes (arret et rejeux compris)
+				m_pubClk.store(m_clkBase, std::memory_order_release);
 				m_run_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
 				if (m_run_ns - tlast > 5000000000ull)   // un compte rendu toutes les ~5 s de fil actif
 				{
@@ -458,7 +492,10 @@ private:
 	mb86234_device &m_dev;
 	std::mutex m_mtx;
 	std::condition_variable m_cv, m_cv_state;
-	std::atomic<bool> m_want_run{ false }, m_quit{ false }, m_sleeping{ false };
+	std::atomic<bool> m_want_run{ false }, m_quit{ false }, m_sleeping{ false }, m_idle{ false }, m_parked_flag{ true };
+	std::atomic<u64> m_pubClk{ 0 };
+	u64 m_clkBase = 0;           // horloge emulee du TGP au debut de la tranche (fil TGP seul)
+	double m_nsPerCycle = 60.0;
 	bool m_parked = true;
 	int m_spin_us = 150;
 	unsigned long long m_run_ns = 0, m_wait_ns = 0;   // fil TGP seul
@@ -467,18 +504,15 @@ public:
 private:
 	alignas(64) std::atomic<u32> m_in_h{ 0 }, m_in_t{ 0 };
 	alignas(64) std::atomic<u32> m_out_h{ 0 }, m_out_t{ 0 };
-	u32 m_in[N], m_out[N];
+	Word m_in[N], m_out[N];
 	std::thread m_thread;   // declare en dernier : demarre quand tout le reste existe
 };
 
 static bool tcvr_tgp_thread_wanted()
 {
-#if defined(__SWITCH__)
-	// Switch : actif par defaut (mesure : course lourde 45-58 -> 59-60 images/s) ; =0 pour l'ancien comportement sequentiel
-	static const bool want = [] { char v[PROP_VALUE_MAX] = {}; return !(__system_property_get("debug.tcvr.m2.tgpthread", v) > 0 && v[0] == '0'); }();
-#else
+	// DESACTIVE PAR DEFAUT (02/10) : le fil fait tourner le TGP en temps reel et non en temps emule, ce qui change le rythme du jeu
+	// (meme replay, meme image 3000 : 144 km/h en 3e avec le fil, 210 km/h en 4e sans, comme la reference native). debug.tcvr.m2.tgpthread=1 l'active.
 	static const bool want = [] { char v[PROP_VALUE_MAX] = {}; return __system_property_get("debug.tcvr.m2.tgpthread", v) > 0 && v[0] == '1'; }();
-#endif
 	return want;
 }
 #endif
@@ -737,7 +771,7 @@ u32 model2_state::fifo_control_r()
 	extern unsigned long g_tcvr_rd_fifo; ++g_tcvr_rd_fifo;
 #if defined(__ANDROID__)
 	if (m_tcvr_tgp)
-		return m_tcvr_tgp->out_empty() ? 1 : 0;
+		return m_tcvr_tgp->out_ready(tcvr_i960_ns()) ? 0 : 1;   // 1 = vide (aucun mot lisible a l'heure de l'i960)
 #endif
 	return m_copro_fifo_out->is_empty() ? 1 : 0;
 }
@@ -975,7 +1009,7 @@ void model2_tgp_state::copro_function_port_w(offs_t offset, u32 data)
 	d |= a << 23;
 #if defined(__ANDROID__)
 	{ extern unsigned long g_tcvr_copro_pop; ++g_tcvr_copro_pop; }
-	if (m_tcvr_tgp) { m_tcvr_tgp->push_in(u32(d)); return; }
+	if (m_tcvr_tgp) { m_tcvr_tgp->push_in(u32(d), tcvr_i960_ns()); return; }
 #endif
 	m_copro_fifo_in->push(u32(d));
 }
@@ -1004,7 +1038,7 @@ u32 model2_tgp_state::copro_fifo_r()
 	if (m_tcvr_tgp)
 	{
 		u32 v = 0;
-		if (!m_tcvr_tgp->pop_out(v))
+		if (!m_tcvr_tgp->pop_out(tcvr_i960_ns(), v))
 			m_maincpu->i960_stall();   // rien encore : on rejoue la lecture (le temps emule avance, le TGP finit son travail)
 		return v;
 	}
@@ -1021,7 +1055,7 @@ void model2_tgp_state::copro_fifo_w(u32 data)
 	}
 #if defined(__ANDROID__)
 	else if (m_tcvr_tgp)
-		m_tcvr_tgp->push_in(u32(data));
+		m_tcvr_tgp->push_in(u32(data), tcvr_i960_ns());
 #endif
 	else
 		m_copro_fifo_in->push(u32(data));
