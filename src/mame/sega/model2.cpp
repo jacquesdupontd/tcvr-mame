@@ -284,10 +284,10 @@ void model2_state::machine_start()
 // debug.tcvr.m2.tgpthread=1 pour l'activer.
 extern "C" __attribute__((weak)) void tcvr_tgp_started(void);
 extern "C" __attribute__((weak)) int __android_log_print(int prio, const char *tag, const char *fmt, ...);
-static void tcvr_tgp_report(unsigned long long run_ns, unsigned long long wait_ns)
+static void tcvr_tgp_report(unsigned long long run_ns, unsigned long long wait_ns, double busy_emu_ms = 0, double clk_ms = 0)
 {
 	if (__android_log_print)
-		__android_log_print(4, "TGPTHREAD", "TGP : dans l'interpreteur %.0f ms, dont attente %.0f ms, utile %.0f ms", run_ns / 1e6, wait_ns / 1e6, (run_ns - wait_ns) / 1e6);
+		__android_log_print(4, "TGPTHREAD", "TGP : dans l'interpreteur %.0f ms, dont attente %.0f ms, utile %.0f ms | temps EMULE occupe %.0f ms (rapport emule/reel utile %.2f), horloge emulee %.0f ms", run_ns / 1e6, wait_ns / 1e6, (run_ns - wait_ns) / 1e6, busy_emu_ms, (run_ns > wait_ns) ? busy_emu_ms / ((run_ns - wait_ns) / 1e6) : 0.0, clk_ms);
 }
 
 class model2_state::tcvr_tgp_thread
@@ -477,13 +477,14 @@ private:
 			{
 				const auto t0 = std::chrono::steady_clock::now();
 				m_dev.tcvr_run(kChunk);
+				m_busyCycles += unsigned(kChunk - m_dev.tcvr_icount());
 				m_clkBase += u64(double(kChunk - m_dev.tcvr_icount()) * m_nsPerCycle);   // cycles reellement consommes (arret et rejeux compris)
 				m_pubClk.store(m_clkBase, std::memory_order_release);
 				m_run_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
 				if (m_run_ns - tlast > 5000000000ull)   // un compte rendu toutes les ~5 s de fil actif
 				{
 					tlast = m_run_ns;
-					tcvr_tgp_report(m_run_ns, m_wait_ns);
+					tcvr_tgp_report(m_run_ns, m_wait_ns, double(m_busyCycles) * m_nsPerCycle / 1e6, double(m_clkBase) / 1e6);
 				}
 			}
 		}
@@ -498,7 +499,7 @@ private:
 	double m_nsPerCycle = 60.0;
 	bool m_parked = true;
 	int m_spin_us = 150;
-	unsigned long long m_run_ns = 0, m_wait_ns = 0;   // fil TGP seul
+	unsigned long long m_run_ns = 0, m_wait_ns = 0, m_busyCycles = 0;   // fil TGP seul
 public:
 	std::atomic<unsigned long long> m_n_in_sleep{0}, m_n_in_empty{0}, m_n_out_fail{0}, m_n_out_wait{0}, m_n_in_words{0}, m_n_out_words{0};
 private:
