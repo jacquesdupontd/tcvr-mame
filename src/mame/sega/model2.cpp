@@ -336,6 +336,14 @@ public:
 			else std::this_thread::yield();
 		}
 	}
+	// horodatage du prochain mot de sortie, s'il est deja calcule (sinon faux)
+	bool head_ts(u64 &ts) const
+	{
+		const u32 t = m_out_t.load(std::memory_order_relaxed);
+		if (m_out_h.load(std::memory_order_acquire) == t) return false;
+		ts = m_out[t & (N - 1)].ns;
+		return true;
+	}
 	bool pop_out(u64 now, u32 &v)
 	{
 		if (!out_ready(now)) return false;
@@ -1043,8 +1051,17 @@ u32 model2_tgp_state::copro_fifo_r()
 	if (m_tcvr_tgp)
 	{
 		u32 v = 0;
-		if (!m_tcvr_tgp->pop_out(tcvr_i960_ns(), v))
+		const u64 now = tcvr_i960_ns();
+		if (!m_tcvr_tgp->pop_out(now, v))
+		{
 			m_maincpu->i960_stall();   // rien encore : on rejoue la lecture (le temps emule avance, le TGP finit son travail)
+			// Le mot attendu est deja calcule mais date d'un peu plus tard : le i960 est bloque sur ce bus, il n'a rien d'autre a faire
+			// que d'attendre. On consomme d'un coup les cycles jusqu'a cette date au lieu de rejouer la lecture cycle par cycle.
+			u64 ts;
+			static const bool s_skip = tcvr_prop_flag("debug.tcvr.m2.fifoskip", true);
+			if (s_skip && m_tcvr_tgp->head_ts(ts) && ts > now)
+				m_maincpu->eat_cycles(int(std::min<u64>(((ts - now) * m_maincpu->unscaled_clock() + 999999999ull) / 1000000000ull, 1000000ull)));
+		}
 		return v;
 	}
 #endif

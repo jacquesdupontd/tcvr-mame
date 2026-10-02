@@ -212,6 +212,14 @@ void device_execute_interface::trigger(int trigid)
 //  for a device
 //-------------------------------------------------
 
+u64 device_execute_interface::tcvr_local_ns() const noexcept
+{
+	u64 ns = u64(m_localtime.seconds()) * 1000000000ull + u64(m_localtime.attoseconds() / 1000000000ll);
+	if (executing())
+		ns += u64(double(m_cycles_running - *m_icountptr) * (double(m_attoseconds_per_cycle) * 1e-9));
+	return ns;
+}
+
 attotime device_execute_interface::local_time() const noexcept
 {
 	// if we're active, add in the time from the current slice

@@ -185,6 +185,13 @@ public:
 
 	// time and cycle accounting
 	attotime local_time() const noexcept;
+	u64 tcvr_local_ns() const noexcept;
+	// idem, pour un appel fait PAR le peripherique pendant qu'il s'execute (pas de test executing(), tout inline)
+	u64 tcvr_local_ns_running() const noexcept
+	{
+		return u64(m_localtime.seconds()) * 1000000000ull + u64(m_localtime.attoseconds() / 1000000000ll)
+				+ u64(double(m_cycles_running - *m_icountptr) * (double(m_attoseconds_per_cycle) * 1e-9));
+	}   // local_time() en ns, sans la division 128 bits de cycles_to_attotime (appelee a chaque acces FIFO du TGP)
 	u64 total_cycles() const noexcept;
 
 	// required operation overrides

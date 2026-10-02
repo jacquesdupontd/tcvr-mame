@@ -32,6 +32,10 @@
 
 // TODO : Envelope/LFO times are based on 44100Hz case?
 #include "emu.h"
+#if defined(__ANDROID__)
+#include <android/log.h>
+#include <sys/system_properties.h>
+#endif
 #include "scsp.h"
 
 #include <algorithm>
@@ -1298,18 +1302,54 @@ inline s32 scsp_device::UpdateSlot(SCSP_SLOT *slot)
 
 void scsp_device::DoMasterSamples(sound_stream &stream)
 {
+#if defined(__ANDROID__)
+	{	// BANC : debug.tcvr.scsp.mute=1 rend du silence sans rien calculer (mesure de ce que coute le SCSP, pas un reglage de jeu)
+		static const bool s_mute = [] { char v[PROP_VALUE_MAX] = {}; return __system_property_get("debug.tcvr.scsp.mute", v) > 0 && v[0] == '1'; }();
+		if (s_mute) { for (int s = 0; s < stream.samples(); ++s) { stream.put_int_clamp(0, s, 0, 32768); stream.put_int_clamp(1, s, 0, 32768); } return; }
+	}
+#endif
+	// Les registres ne changent pas pendant cet appel : on dresse une fois la liste des voies actives (les autres
+	// ne font qu'avancer le pointeur de l'anneau FM, calculable : +32 par echantillon). Meme sortie, bit a bit.
+	int act[32], nact = 0;
+	for (int sl = 0; sl < 32; ++sl)
+		if (m_Slots[sl].active)
+			act[nact++] = sl;
+
+#if defined(__ANDROID__)
+	{	// compteurs de charge (une fois par appel) : voies actives, FM, LFO, DSP
+		static u64 ns = 0, nslots = 0, nfm = 0, nlfo = 0, ndsp = 0, ncalls = 0, nloop = 0, npcm8 = 0;
+		const int n = stream.samples();
+		ns += n; ncalls++; nslots += u64(nact) * n;
+		for (int ai = 0; ai < nact; ++ai)
+		{
+			SCSP_SLOT *sl = m_Slots + act[ai];
+			if (MDL(sl) != 0 || MDXSL(sl) != 0 || MDYSL(sl) != 0) nfm += n;
+			if (PLFOS(sl) != 0 || ALFOS(sl) != 0) nlfo += n;
+			if (IMXL(sl) != 0) ndsp += n;
+			if (LPCTL(sl) != 0) nloop += n;
+			if (PCM8B(sl)) npcm8 += n;
+		}
+		if (ns >= 44100)
+		{
+			__android_log_print(ANDROID_LOG_INFO, "SCSPLOAD", "echantillons %llu appels %llu | voies actives moy %.1f, FM %.1f, LFO %.1f, vers DSP %.1f, bouclees %.1f, 8 bits %.1f",
+				(unsigned long long)ns, (unsigned long long)ncalls, double(nslots) / ns, double(nfm) / ns, double(nlfo) / ns, double(ndsp) / ns, double(nloop) / ns, double(npcm8) / ns);
+			ns = nslots = nfm = nlfo = ndsp = ncalls = nloop = npcm8 = 0;
+		}
+	}
+#endif
+
 	for (int s = 0; s < stream.samples(); ++s)
 	{
 		s32 smpl = 0, smpr = 0;
+		const u8 bufptr0 = m_BUFPTR;
 
-		for (int sl = 0; sl < 32; ++sl)
+		for (int ai = 0; ai < nact; ++ai)
 		{
-#if SCSP_FM_DELAY
-			m_RBUFDST = m_DELAYBUF + m_DELAYPTR;
-#else
+			const int sl = act[ai];
+			if (!m_Slots[sl].active)   // une voie peut s'arreter en cours d'appel (fin de sample sans boucle)
+				continue;
+			m_BUFPTR = (bufptr0 + sl) & 63;
 			m_RBUFDST = m_RINGBUF + m_BUFPTR;
-#endif
-			if (m_Slots[sl].active)
 			{
 				SCSP_SLOT *slot = m_Slots + sl;
 				u16 Enc;
@@ -1337,16 +1377,9 @@ void scsp_device::DoMasterSamples(sound_stream &stream)
 				}
 			}
 
-#if SCSP_FM_DELAY
-			m_RINGBUF[(m_BUFPTR + 64 - (SCSP_FM_DELAY - 1)) & 63] = m_DELAYBUF[(m_DELAYPTR + SCSP_FM_DELAY - (SCSP_FM_DELAY - 1)) % SCSP_FM_DELAY];
-#endif
-			++m_BUFPTR;
-			m_BUFPTR &= 63;
-#if SCSP_FM_DELAY
-			++m_DELAYPTR;
-			if (m_DELAYPTR > SCSP_FM_DELAY-1) m_DELAYPTR = 0;
-#endif
 		}
+		m_BUFPTR = (bufptr0 + 32) & 63;
+
 
 		m_DSP.Step();
 
@@ -1471,15 +1504,59 @@ void scsp_device::exec_dma()
 }
 
 
+#if defined(__ANDROID__)
+static bool scsp_defer_writes() { char v[PROP_VALUE_MAX] = {}; return !(__system_property_get("debug.tcvr.scsp.defer", v) > 0 && v[0] == '0'); }   // debug.tcvr.scsp.defer=0 : ancien comportement
+#else
+static bool scsp_defer_writes() { return false; }
+#endif
+
+#if defined(__ANDROID__)
+static u32 s_regR[2][32], s_regW[2][32], s_regOtherR, s_regOtherW; static u64 s_regLast = 0;
+static void scsp_reg_count(bool wr, offs_t off)
+{
+	const u32 a = off * 2;
+	if (a < 0x400) (wr ? s_regW : s_regR)[0][(a & 0x1f) / 2]++;
+	else if (a < 0x440) (wr ? s_regW : s_regR)[1][(a - 0x400) / 2]++;
+	else (wr ? s_regOtherW : s_regOtherR)++;
+	if (++s_regLast % 40000 == 0)
+	{
+		char b[900]; int n = 0;
+		for (int w = 0; w < 2; w++) for (int k = 0; k < 2; k++) {
+			n += snprintf(b + n, sizeof b - n, "%s%s:", w ? "ECR" : "LEC", k ? "-commun" : "-voie");
+			for (int i = 0; i < 32; i++) { const u32 v = (w ? s_regW : s_regR)[k][i]; if (v) n += snprintf(b + n, sizeof b - n, " %02x=%u", i * 2, v); }
+			n += snprintf(b + n, sizeof b - n, " | ");
+		}
+		n += snprintf(b + n, sizeof b - n, "autres L %u E %u", s_regOtherR, s_regOtherW);
+		__android_log_print(ANDROID_LOG_INFO, "SCSPREG", "sur 40000 acces : %s", b);
+		memset(s_regR, 0, sizeof s_regR); memset(s_regW, 0, sizeof s_regW); s_regOtherR = s_regOtherW = 0;
+	}
+}
+#endif
+
 u16 scsp_device::read(offs_t offset)
 {
+#if defined(__ANDROID__)
+	scsp_reg_count(false, offset);
+#endif
 	m_stream->update();
 	return r16(offset * 2);
 }
 
 void scsp_device::write(offs_t offset, u16 data, u16 mem_mask)
 {
-	m_stream->update();
+#if defined(__ANDROID__)
+	scsp_reg_count(true, offset);
+#endif
+	// Le rendu des echantillons ne depend que des registres de voies (< 0x400), du volume (0x400), de la memoire d'anneau (0x402) et du DSP (>= 0x430) ;
+	// le DMA (0x410-0x416) lit/ecrit ces registres. Les ecritures MSLC (0x408, ~39 000 sur 40 000 acces dans Sega Rally : le pilote son l'ecrit en boucle),
+	// MIDI (0x404-0x406) et timers/interruptions (0x418-0x42e) ne changent rien au son : on ne force plus le rendu a chaque ecriture
+	// (21 000 appels par seconde pour 44 100 echantillons) ; l'etat lu par le 68000 reste exact (toute lecture synchronise, comme avant).
+	{
+		const u32 a = offset * 2;
+		static const bool s_defer = scsp_defer_writes();
+		if (!(s_defer && ((a >= 0x404 && a < 0x410) || (a >= 0x418 && a < 0x430))))
+			m_stream->update();
+	}
 
 	u16 tmp = r16(offset * 2);
 	COMBINE_DATA(&tmp);

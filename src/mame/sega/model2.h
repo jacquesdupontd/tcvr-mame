@@ -339,7 +339,8 @@ public:
 	void tcvr_tgp_destroy();
 protected:
 	// heure emulee courante de l'i960, en ns (horodatage des mots echanges avec le fil TGP)
-	u64 tcvr_i960_ns() const { const attotime t = m_maincpu->local_time(); return u64(t.seconds()) * 1000000000ull + u64(t.attoseconds() / 1000000000ll); }
+	u64 tcvr_i960_ns() const { u64 n = m_maincpu->tcvr_local_ns_running(); if (n < m_tcvr_ns_last) n = m_tcvr_ns_last; return m_tcvr_ns_last = n; }   // jamais en arriere (arrondis aux jointures de tranches)
+	mutable u64 m_tcvr_ns_last = 0;
 private:
 	std::unique_ptr<raster_state> m_raster_alt;
 	raster_state *m_raster_ptr[2] = { nullptr, nullptr };
