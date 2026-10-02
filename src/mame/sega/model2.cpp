@@ -473,12 +473,9 @@ private:
 
 static bool tcvr_tgp_thread_wanted()
 {
-#if defined(__SWITCH__)
-	// Switch : actif par defaut (mesure : course lourde 45-58 -> 59-60 images/s) ; =0 pour l'ancien comportement sequentiel
-	static const bool want = [] { char v[PROP_VALUE_MAX] = {}; return !(__system_property_get("debug.tcvr.m2.tgpthread", v) > 0 && v[0] == '0'); }();
-#else
+	// DESACTIVE PAR DEFAUT (02/10) : le fil fait tourner le TGP en temps reel et non en temps emule, ce qui change le rythme du jeu
+	// (meme replay, meme image 3000 : 144 km/h en 3e avec le fil, 210 km/h en 4e sans, comme la reference native). debug.tcvr.m2.tgpthread=1 l'active.
 	static const bool want = [] { char v[PROP_VALUE_MAX] = {}; return __system_property_get("debug.tcvr.m2.tgpthread", v) > 0 && v[0] == '1'; }();
-#endif
 	return want;
 }
 #endif
