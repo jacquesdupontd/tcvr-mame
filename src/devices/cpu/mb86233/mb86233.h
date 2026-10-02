@@ -107,6 +107,28 @@ private:
 	int m_icount;
 	u32 *m_ram_lo = nullptr, *m_ram_hi = nullptr;
 	u32 *m_prog = nullptr; u32 m_prog_words = 0;   // RAM du programme : lecture directe (le cache d'espace d'adresses coute un appel virtuel par instruction)
+	// registres ordinaires (sans effet de bord) : acces direct par table au lieu de l'appel read_reg/write_reg (commutateur) ; les autres : voie lente
+	struct tcvr_regdesc { void *p; u8 sz; };
+	tcvr_regdesc m_rdesc[64] = {}, m_wdesc[64] = {};
+	void tcvr_init_regs();
+	inline u32 rd_fast(u32 r)
+	{
+		r &= 0x3f;
+		const tcvr_regdesc d = m_rdesc[r];
+		if(d.sz == 4) return *static_cast<u32 *>(d.p);
+		if(d.sz == 2) return *static_cast<u16 *>(d.p);
+		if(d.sz == 1) return *static_cast<u8 *>(d.p);
+		return read_reg(r);
+	}
+	inline void wr_fast(u32 r, u32 v)
+	{
+		r &= 0x3f;
+		const tcvr_regdesc d = m_wdesc[r];
+		if(d.sz == 4) { *static_cast<u32 *>(d.p) = v; return; }
+		if(d.sz == 2) { *static_cast<u16 *>(d.p) = u16(v); return; }
+		if(d.sz == 1) { *static_cast<u8 *>(d.p) = u8(v); return; }
+		write_reg(r, v);
+	}
 	inline u32 rd_prog(u32 a)
 	{
 		a &= 0xffff;
