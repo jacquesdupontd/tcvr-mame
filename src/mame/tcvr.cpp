@@ -1339,7 +1339,7 @@ extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size
 			// steady rate is reached in a few seconds, the cushion term still corrects any drift.
 			if (measured > 65536 * 85 / 100 && measured < 65536 * 115 / 100)
 				s_audio.rate_measured = (s_audio.rate_measured > 0 && std::llabs(measured - s_audio.rate_measured) < 65536 / 20)
-					? s_audio.rate_measured + (measured - s_audio.rate_measured) / 8 : measured;
+					? s_audio.rate_measured + (measured - s_audio.rate_measured) / ((measured < s_audio.rate_measured - 65536 / 100) ? 2 : 8) : measured;   // une baisse de cadence est suivie vite (un passage lourd dure ~4 s), une hausse lentement
 		}
 		s_audio.rate_last_write = write_frame;
 		s_audio.rate_output = 0;
