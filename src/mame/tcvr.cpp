@@ -2027,6 +2027,17 @@ extern "C" void tcvr_m2_scene_end(const tcvr_m2_frame *fp)
 		w.frame.dirty[sheet] = w.dirty[sheet].empty() ? nullptr : w.dirty[sheet].data();
 	}
 
+	{   // debug.tcvr.dumpmame=<n> : ecrit la scene dont l'image MAME est >= n (comparaison Switch / natif au meme instant du rejeu)
+		static const unsigned long long want = [] { char b[PROP_VALUE_MAX] = {}; return (__system_property_get("debug.tcvr.dumpmame", b) > 0 && b[0]) ? strtoull(b, nullptr, 10) : 0ull; }();
+		static bool done = false;
+		if (want && !done && w.frame.mame_frame >= want && w.frame.geometry_unchanged == 0 && w.frame.prim_count > 0)
+		{
+			done = true;
+			char path[256]; std::snprintf(path, sizeof path, "%smame%llu.bin", s_m2_dump.prefix.empty() ? "/tmp/" : s_m2_dump.prefix.c_str(), want);
+			tcvr_m2_dump_frame(w.frame, path);
+			__android_log_print(ANDROID_LOG_INFO, kLogTag, "TCVR_DUMP image MAME %u -> %s", w.frame.mame_frame, path);
+		}
+	}
 	if (s_m2_dump.count > s_m2_dump.written && w.frame.geometry_unchanged == 0 && w.frame.prim_count > 0)
 	{
 		if (int(s_m2_dump.seen++) >= s_m2_dump.first && ((s_m2_dump.seen - 1 - uint64_t(s_m2_dump.first)) % uint64_t(s_m2_dump.interval)) == 0)
