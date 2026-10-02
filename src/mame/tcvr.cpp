@@ -2049,6 +2049,42 @@ extern "C" void tcvr_m2_scene_end(const tcvr_m2_frame *fp)
 			s_m2_dump.written++;
 		}
 	}
+	{   // debug.tcvr.rawstat=1 : que fournit encore le jeu AU-DELA des bords du cadre 4:3 ? (flux brut avant ecretage de la carte)
+		static const bool on = [] { char b[PROP_VALUE_MAX] = {}; return __system_property_get("debug.tcvr.rawstat", b) > 0 && b[0] == '1'; }();
+		static unsigned long long nPoly = 0, nBeyondL = 0, nBeyondR = 0, nFullyL = 0, nFullyR = 0, nIn = 0, nScenes = 0; static float maxL = 0, maxR = 0;
+		static unsigned long long hist[8] = {};   // etendue maximale au-dela du bord : <8, <16, <32, <64, <128, <256, <512, plus
+		if (on && w.raw_prims.size())
+		{
+			for (const tcvr_m2_prim &rp : w.raw_prims)
+			{
+				if (rp.vertex_count < 3 || rp.first_vertex + rp.vertex_count > w.raw_vertices.size()) continue;
+				float mn = 1e9f, mx = -1e9f; bool zok = true;
+				for (uint32_t k = 0; k < rp.vertex_count; k++)
+				{
+					const tcvr_m2_raw_vertex &rv = w.raw_vertices[rp.first_vertex + k];
+					if (!(rv.z > 1e-3f)) { zok = false; break; }
+					const float sx = float(rp.center_x) + rv.x / rv.z;
+					mn = std::min(mn, sx); mx = std::max(mx, sx);
+				}
+				if (!zok) continue;
+				nPoly++;
+				const float l = float(rp.clip_l), r = float(rp.clip_r + 1);
+				if (mx < l) { nFullyL++; nBeyondL++; maxL = std::max(maxL, l - mn); }
+				else if (mn < l) { nBeyondL++; maxL = std::max(maxL, l - mn); }
+				if (mn >= r) { nFullyR++; nBeyondR++; maxR = std::max(maxR, mx - r); }
+				else if (mx > r) { nBeyondR++; maxR = std::max(maxR, mx - r); }
+				if (mn >= l && mx <= r) nIn++;
+				const float over = std::max(l - mn, mx - r);
+				if (over > 0) { int b = over < 8 ? 0 : over < 16 ? 1 : over < 32 ? 2 : over < 64 ? 3 : over < 128 ? 4 : over < 256 ? 5 : over < 512 ? 6 : 7; hist[b]++; }
+			}
+			if (++nScenes == 120)
+			{
+				__android_log_print(ANDROID_LOG_INFO, "TCVR_RAWSTAT", "par scene : %llu polygones bruts, %llu entierement dans le cadre, %llu depassent a gauche (dont %llu entierement dehors), %llu a droite (dont %llu dehors) ; depassement max %.0f px gauche / %.0f px droite ; histogramme du depassement (<8,<16,<32,<64,<128,<256,<512,plus) : %llu %llu %llu %llu %llu %llu %llu %llu",
+					nPoly / 120, nIn / 120, nBeyondL / 120, nFullyL / 120, nBeyondR / 120, nFullyR / 120, maxL, maxR, hist[0] / 120, hist[1] / 120, hist[2] / 120, hist[3] / 120, hist[4] / 120, hist[5] / 120, hist[6] / 120, hist[7] / 120);
+				nPoly = nBeyondL = nBeyondR = nFullyL = nFullyR = nIn = nScenes = 0; maxL = maxR = 0; for (auto &h : hist) h = 0;
+			}
+		}
+	}
 	std::lock_guard lock(s_m2_scene.mutex);
 	s_m2_scene.invalid = false;
 	w.frame.sequence = ++s_m2_scene.sequence;
