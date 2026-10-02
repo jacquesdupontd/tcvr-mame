@@ -2811,8 +2811,28 @@ void model2o_state::init_daytona()
 	const bool found = rom[0x83d4 / 4] == 0x901e2074;   // ld 0x74(g8),r3
 	if (found)
 		rom[0x83d4 / 4] = 0x901e2078;                    // ld 0x78(g8),r3
+	// ... and its POLYGON BUDGET (02/10, Guillaume, the morning after: "bug d'affichage décor au loin, qui en plus fait passer
+	// le ciel ou le décor qui se trouve derrière au fond par-dessus le reste"). The game stops drawing objects once their
+	// cost this frame (0x5010E8) passes a budget (0x5010F4), 5000, written once at boot by "lda 0x1388,r3 / st r3,0x5010f4"
+	// at 0x12F8 (0x1210 in daytona93, found by the static recompilation alphanu1/daytona-arcade-recomp, enhance.cpp). The
+	// cabinet's attract peaks at 4961; with the 103-polygon bodies at 5253, at the budget in 94 frames of 3000 (PC MAME),
+	// the scenery drawn last -- the far cells -- skipped and the sky seen through it. Virtua Racing's lesson again: a budget
+	// is only safe far above anything measured. 20000; debug.tcvr.daytona.budget overrides it (5000 = the cabinet's).
+	u32 budget = 20000;
 #if defined(__ANDROID__)
-	__android_log_print(ANDROID_LOG_INFO, "TCVR_DAYTONA", "far cars: %s", found ? "103-polygon bodies instead of the 16-polygon boxes" : "instruction not found, cabinet boxes kept");
+	{
+		char value[PROP_VALUE_MAX] = {};
+		if (__system_property_get("debug.tcvr.daytona.budget", value) > 0 && value[0] && value[0] != '"')
+			budget = u32(atoi(value));
+	}
+#endif
+	const bool budgetFound = rom[0x12f8 / 4] == 0x8c183000 && rom[0x12fc / 4] == 0x1388 && rom[0x1300 / 4] == 0x92183000 &&
+	                         rom[0x1304 / 4] == 0x005010f4;
+	if (budgetFound && budget > 0)
+		rom[0x12fc / 4] = budget;
+#if defined(__ANDROID__)
+	__android_log_print(ANDROID_LOG_INFO, "TCVR_DAYTONA", "far cars: %s; polygon budget %s %u", found ? "103-polygon bodies instead of the 16-polygon boxes" : "instruction not found, cabinet boxes kept",
+	                    budgetFound ? "raised to" : "not found, kept at", budgetFound ? budget : 5000u);
 #endif
 }
 
