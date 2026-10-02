@@ -438,6 +438,8 @@ public:
 	void vcop(machine_config &config) ATTR_COLD;
 
 	void init_daytona() ATTR_COLD;   // TCVR: the far cars' 16-polygon boxes replaced by the 103-polygon bodies (model2.cpp)
+	void tcvr_cells_w(offs_t offset, u32 data);   // TCVR: Daytona's course cell draw list, wider (model2.cpp)
+	int m_tcvr_cells_radius = 2;                  // 2 = the cabinet's 5x5 (with its two visibility masks)
 
 protected:
 	void daytona_output_w(u8 data);

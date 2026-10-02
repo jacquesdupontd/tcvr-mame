@@ -1367,9 +1367,37 @@ void model2_tgp_state::model2_tgp_mem(address_map &map)
 }
 
 /* original Model 2 overrides */
+// Daytona's course cell draw list (init_daytona): the patched end of the list builder writes here.
+void model2o_state::tcvr_cells_w(offs_t offset, u32 data)
+{
+	address_space &sp = m_maincpu->space(AS_PROGRAM);
+	if (offset == 0)   // r12 = the end of the game's list: its count, as the game wrote it
+	{
+		sp.write_byte(0x5016c0, u8(data - 0x5016c1));
+		return;
+	}
+	if (m_tcvr_cells_radius <= 2 || data > 255)   // r8 = the car's cell (a cell is x + 16 y on a 16x16 grid)
+		return;
+	const int cx = int(data & 15), cy = int(data >> 4);
+	int n = 0;
+	for (int r = 0; r <= m_tcvr_cells_radius; r++)
+		for (int dy = -r; dy <= r; dy++)
+			for (int dx = -r; dx <= r; dx++)
+			{
+				if (std::max(std::abs(dx), std::abs(dy)) != r)
+					continue;
+				const int x = cx + dx, y = cy + dy;
+				if (x < 0 || x > 15 || y < 0 || y > 15 || n >= 63)
+					continue;
+				sp.write_byte(0x5016c1 + n++, u8(x + 16 * y));
+			}
+	sp.write_byte(0x5016c0, u8(n));
+}
+
 void model2o_state::model2o_mem(address_map &map)
 {
 	model2_tgp_mem(map);
+	map(0x01e00000, 0x01e00007).w(FUNC(model2o_state::tcvr_cells_w));   // TCVR: Daytona's cell list (unmapped on the board)
 
 	map(0x00200000, 0x0021ffff).ram().flags(i960_cpu_device::BURST);
 	map(0x00220000, 0x0023ffff).rom().region("maincpu", 0x20000).flags(i960_cpu_device::BURST);
@@ -2804,12 +2832,13 @@ void model2_state::sj25_0207_01(machine_config &config)
 // per frame +8 % (median 1218 -> 1317), +17 % at the 95th percentile. debug.tcvr.daytona.farCars=0 keeps the boxes (bench).
 void model2o_state::init_daytona()
 {
+	bool farCars = true;
 #if defined(__ANDROID__)
-	if (!tcvr_prop_flag("debug.tcvr.daytona.farCars", true)) return;
+	farCars = tcvr_prop_flag("debug.tcvr.daytona.farCars", true);
 #endif
 	u32 *rom = reinterpret_cast<u32 *>(memregion("maincpu")->base());
 	const bool found = rom[0x83d4 / 4] == 0x901e2074;   // ld 0x74(g8),r3
-	if (found)
+	if (found && farCars)
 		rom[0x83d4 / 4] = 0x901e2078;                    // ld 0x78(g8),r3
 	// ... and its POLYGON BUDGET (02/10, Guillaume, the morning after: "bug d'affichage décor au loin, qui en plus fait passer
 	// le ciel ou le décor qui se trouve derrière au fond par-dessus le reste"). The game stops drawing objects once their
@@ -2830,9 +2859,40 @@ void model2o_state::init_daytona()
 	                         rom[0x1304 / 4] == 0x005010f4;
 	if (budgetFound && budget > 0)
 		rom[0x12fc / 4] = budget;
+	// ... and how far it draws (02/10, Guillaume in the headset: "la route est coupée au loin et tu vois le fond qui passe à
+	// travers"). The road surface belongs to the COURSE CELLS' scenery (PC MAME, attract frame 1500: the road-textured
+	// polygons all come from cell objects; the 14-section road window at 0x1442C/0x1448C feeds the race logic only --
+	// extended to 20 it drew not one polygon more). The game lists the cells to draw from the 5x5 around the car's cell,
+	// filtered by two visibility masks (0x17404..0x17507, count 0x5016C0, cells from 0x5016C1, room for 63; alphanu1/
+	// daytona-arcade-recomp's "draw distance", hook 0x17078 in daytona93 = 0x17508 here). The end of the builder, "lda
+	// 0x5016c1,r3 / subo r3,r12,r12 / stob r12,0x5016c0" (count), becomes "st r12,0x1e00000 / mov r3,r3 / st r8,0x1e00004":
+	// tcvr_cells_w gets the end of the game's list (and writes its count back, as the game did), then the car's cell (r8),
+	// and with a radius above 2 rewrites the list with every cell within it, nearest ring first. The bitmaps and the near
+	// list the race logic reads are untouched: PC MAME, attract, 4000 frames, the level, the car's section and its index
+	// are identical frame for frame with the cabinet's list and with radius 3 (49 cells; frame 2400: 1824 -> 3036
+	// polygons, road polygons 118 -> 213). debug.tcvr.daytona.cells overrides the radius (2 = the cabinet's, at most 3).
+	int cells = 3;
 #if defined(__ANDROID__)
-	__android_log_print(ANDROID_LOG_INFO, "TCVR_DAYTONA", "far cars: %s; polygon budget %s %u", found ? "103-polygon bodies instead of the 16-polygon boxes" : "instruction not found, cabinet boxes kept",
-	                    budgetFound ? "raised to" : "not found, kept at", budgetFound ? budget : 5000u);
+	{
+		char value[PROP_VALUE_MAX] = {};
+		if (__system_property_get("debug.tcvr.daytona.cells", value) > 0 && value[0] && value[0] != '"')
+			cells = atoi(value);
+	}
+#endif
+	const bool cellsFound = rom[0x174f4 / 4] == 0x8c183000 && rom[0x174f8 / 4] == 0x005016c1 && rom[0x174fc / 4] == 0x59630103 &&
+	                        rom[0x17500 / 4] == 0x82603000 && rom[0x17504 / 4] == 0x005016c0;
+	m_tcvr_cells_radius = cellsFound ? std::clamp(cells, 2, 3) : 2;
+	if (cellsFound && m_tcvr_cells_radius > 2)
+	{
+		rom[0x174f4 / 4] = 0x92603000; rom[0x174f8 / 4] = 0x01e00000;   // st r12,0x1e00000   (end of the game's list)
+		rom[0x174fc / 4] = 0x5c181603;                                 // mov r3,r3          (r3 is reloaded before use)
+		rom[0x17500 / 4] = 0x92403000; rom[0x17504 / 4] = 0x01e00004;   // st r8,0x1e00004    (the car's cell)
+	}
+#if defined(__ANDROID__)
+	__android_log_print(ANDROID_LOG_INFO, "TCVR_DAYTONA", "far cars: %s; polygon budget %s %u; course cells drawn %s",
+	                    !found ? "instruction not found, cabinet boxes kept" : (farCars ? "103-polygon bodies instead of the 16-polygon boxes" : "cabinet boxes (setting)"),
+	                    budgetFound ? "raised to" : "not found, kept at", budgetFound ? budget : 5000u,
+	                    !cellsFound ? "the cabinet's 5x5 (builder not found)" : (m_tcvr_cells_radius > 2 ? "7x7 around the car (49)" : "the cabinet's 5x5"));
 #endif
 }
 
