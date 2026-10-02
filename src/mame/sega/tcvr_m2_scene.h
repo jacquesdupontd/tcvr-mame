@@ -91,6 +91,8 @@ struct tcvr_m2_prim
 	// Smooth motion (25/09): the polygon's object (polygon data address), its rank in the object, and which copy of
 	// that object it is in the frame. Model 1 carries its own ids in the raw vertices' u/v instead.
 	uint32_t motion_addr, motion_poly, motion_serial;
+	// En-tete de texture brut (texheader[0] et [2]) : l'identite d'une texture pour les packs HD du Model 2 Emulator (ID1 = th2 << 16 | th0 sans ses bits de repetition).
+	uint32_t texheader0, texheader2;
 };
 
 struct tcvr_m2_frame

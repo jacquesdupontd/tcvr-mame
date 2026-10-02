@@ -576,6 +576,7 @@ void model2_state::model2_3d_process_polygon(raster_state *raster, u32 attr)
 		tp.motion_addr = raster->tcvr_obj_addr;
 		tp.motion_poly = tcvr_rank;
 		tp.motion_serial = raster->tcvr_obj_serial;
+		tp.texheader0 = object.texheader[0]; tp.texheader2 = object.texheader[2];
 		// the object matrix and focus these vertices were transformed with (smooth motion by the game's matrices)
 		float mo[16];
 		for (int mi = 0; mi < 12; mi++) mo[mi] = m_geo->matrix[mi];
@@ -784,6 +785,7 @@ void model2_renderer::model2_3d_render(polygon *poly, const rectangle &cliprect)
 		tp.center_x = poly->center[0];
 		tp.center_y = poly->center[1];
 		tp.window = poly->window;
+		tp.texheader0 = poly->texheader[0]; tp.texheader2 = poly->texheader[2];
 		tcvr_m2_scene_poly(tv, tn, &tp);
 	}
 
@@ -3119,6 +3121,7 @@ private:
 		tp.center_x = poly->center[0];
 		tp.center_y = poly->center[1];
 		tp.window = poly->window;
+		tp.texheader0 = poly->texheader[0]; tp.texheader2 = poly->texheader[2];
 		tcvr_m2_scene_poly(tv, tn, &tp);
 	}
 
