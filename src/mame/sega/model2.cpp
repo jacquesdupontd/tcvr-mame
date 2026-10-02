@@ -331,9 +331,9 @@ public:
 		{
 			const int r = check_out(now);
 			if (r >= 0) return r == 1;
-			if (spins < 200) cpu_relax();
-			else if (spins < 4000) std::this_thread::yield();
-			else std::this_thread::sleep_for(std::chrono::microseconds(50));
+			// attente ACTIVE (le TGP est sur un autre coeur) : un sommeil, meme court, coute plus que la latence attendue (mesure : 20 % du fil d'emulation)
+			if (spins < 20000) cpu_relax();
+			else std::this_thread::yield();
 		}
 	}
 	bool pop_out(u64 now, u32 &v)
