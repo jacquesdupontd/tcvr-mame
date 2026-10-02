@@ -1323,7 +1323,7 @@ extern "C" std::size_t tcvr_mame_audio_read(std::int16_t *destination, std::size
 	// back to where it should sit.
 	s_audio.rate_output += destination_frames;
 	const bool follow_producer = s_audio.policy_follow_producer.load(std::memory_order_acquire);
-	if (s_audio.rate_output >= std::size_t(s_audio.rate) / (follow_producer ? 1 : 4))
+	if (s_audio.rate_output >= std::size_t(s_audio.rate) / 4)   // lecture de la cadence toutes les 250 ms (avant : 1 s en mode suivi) : un passage lourd ne dure que ~4 s
 	{
 		if (s_audio.rate_last_write != 0 && write_frame > s_audio.rate_last_write)
 		{
